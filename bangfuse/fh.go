@@ -30,6 +30,9 @@ func (f *BangFH) String() string {
 
 var _ = (fs.FileWriter)((*BangFH)(nil))
 var _ = (fs.FileReader)((*BangFH)(nil))
+var _ = (fs.FileFlusher)((*BangFH)(nil))
+
+//var _ = (fs.FileFlusher)(*BangFH)(nil))
 
 //var _ = (fs.File)
 
@@ -187,6 +190,17 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 	return 0
 }
 
+func (f *BangFH) Flush(ctx context.Context) syscall.Errno {
+	op := bangutil.GetTracer().Op("Flush", f.Inum, f.Metadata.Name)
+
+	if err := f.writeMeta(ctx); err != nil {
+		op.Errorf("writing metadata")
+		return syscall.EIO
+	}
+	op.Done()
+	return 0
+}
+
 // Write writes to the inode at the given offset and returns the number of bytes written.
 // Handles append, overwrite, and write-past-EOF (zero-fill gap).
 func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
@@ -195,9 +209,11 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 
 	// Re-read metadata: Setattr (e.g. O_TRUNC truncate) may have changed it.
 	// TODO: to save an extra read call we can track filehandles in the BangFile struct.
-	if err := f.resyncMetadata(ctx); err != nil {
-		op.Error(fmt.Errorf("resyncMetadata: %v", err))
-		return 0, syscall.EIO
+	if off == 0 {
+		if err := f.resyncMetadata(ctx); err != nil {
+			op.Error(fmt.Errorf("resyncMetadata: %v", err))
+			return 0, syscall.EIO
+		}
 	}
 
 	filesize := int64(f.Metadata.Size)
@@ -227,11 +243,6 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 	// Update file size
 	if write_end > filesize {
 		f.Metadata.Size = uint64(write_end)
-	}
-
-	if err := f.writeMeta(ctx); err != nil {
-		op.Error(fmt.Errorf("syncing metadata (chunks and size): %v", err))
-		return 0, syscall.EIO
 	}
 
 	//op.Debugf("Wrote %d bytes at offset %d (new size: %d)", len(data), off, f.Metadata.Size)

@@ -39,6 +39,7 @@ func main() {
 	}
 	httpPort := flag.Uint("http-port", httpPortDefault, "Riak HTTP port for stats/df (env: RIAK_HTTP_PORT)")
 	dataPath := flag.String("data-path", envOrDefault("BANGFS_DATA_PATH", "/data"), "Preferred disk mount path for df (env: BANGFS_DATA_PATH)")
+	cacheSize := flag.Int("cache-size", 256*1024*1024, "Chunk cache size in bytes (default 256MB)")
 	trace := flag.Bool("trace", false, "Enable tracing output for debugging")
 	tracelog := flag.String("tracelog", "", "Write trace output to file instead of stderr")
 
@@ -92,7 +93,7 @@ func main() {
 			os.Exit(1)
 		}
 		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace, uint16(*httpPort), *dataPath)
+		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace, uint16(*httpPort), *dataPath, *cacheSize, log.Default().Writer())
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}

@@ -197,6 +197,7 @@ func (bf *BangFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, 
 
 	inum := bf.Inode.StableAttr().Ino
 	op := bangutil.GetTracer().Op("Open", inum, "")
+	op.Debug(debugOpenFlags(flags))
 
 	meta, vclock, err := gKVStore.Metadata(inum)
 	if err != nil {

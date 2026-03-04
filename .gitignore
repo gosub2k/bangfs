@@ -19,3 +19,4 @@ bangfs-*
 bangfs_testbang
 test_fs_caching_shim.sh
 test_fs_simple_wr.sh
+test_fs_*sh

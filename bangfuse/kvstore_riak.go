@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	riak "github.com/basho/riak-go-client"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"google.golang.org/protobuf/proto"
 
 	bangpb "bangfs/proto"
@@ -22,6 +24,13 @@ const chunkBucket = "chunks"
 
 const statsHTTPTimeout = 5 * time.Second
 
+const maxQueueLen = 1000
+const numWriteWorkers = 8
+
+type chunkEntry struct {
+	data []byte
+}
+
 // RiakKVStore holds a connection to the Riak backend
 type RiakKVStore struct {
 	metadataBucketType string
@@ -31,18 +40,43 @@ type RiakKVStore struct {
 	pb_port            uint16
 	httpPort           uint16 // Riak HTTP API port for stats (default 8098)
 	dataPath           string // preferred disk mount point for df (default "/data")
+	chunkCache         *lru.Cache[uint64, chunkEntry]
+	writeQueue         chan riak.Command
+	writeWg            sync.WaitGroup
+	errChan            chan error
+}
+
+func (kv *RiakKVStore) riakWriteWorker() {
+	kv.writeWg.Add(1)
+	defer kv.writeWg.Done()
+	for cmd := range kv.writeQueue {
+		if err := kv.cluster.Execute(cmd); err != nil {
+			// Could also consider invalidating the cache here
+			kv.errChan <- fmt.Errorf("failed to execute cmd: %w", err)
+		}
+	}
+}
+
+func (kv *RiakKVStore) enqueue(cmd riak.Command) error {
+	select {
+	case kv.writeQueue <- cmd:
+		return nil
+	default:
+		return fmt.Errorf("write queue full")
+	}
 }
 
 // NewRiakKVStore creates a new KVStore instance.
 // httpPort and dataPath are used for DiskUsage (df support).
 // Pass 0 and "" respectively for defaults.
-func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16, dataPath string) (*RiakKVStore, error) {
+func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16, dataPath string, cacheSize int, errorWriter io.Writer) (*RiakKVStore, error) {
 	if httpPort == 0 {
 		httpPort = 8098
 	}
 	if dataPath == "" {
 		dataPath = "/data"
 	}
+
 	kv := &RiakKVStore{
 		metadataBucketType: namespace + "_bangfs_metadata",
 		chunkBucketType:    namespace + "_bangfs_chunks",
@@ -50,10 +84,29 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 		pb_port:            port,
 		httpPort:           httpPort,
 		dataPath:           dataPath,
+		writeQueue:         make(chan riak.Command, maxQueueLen),
+		errChan:            make(chan error),
 	}
 	if err := kv.Connect(); err != nil {
 		return kv, err // for latter printing of the values
 	}
+
+	chunkCache, cacherr := lru.New[uint64, chunkEntry](max(1, cacheSize/int(GetChunkSize())))
+	if cacherr != nil {
+		return kv, cacherr
+	}
+	kv.chunkCache = chunkCache
+
+	for i := 0; i < numWriteWorkers; i++ {
+		go kv.riakWriteWorker()
+	}
+
+	go func() {
+		for e := range kv.errChan {
+			fmt.Fprintf(errorWriter, "%v", e)
+		}
+	}()
+
 	return kv, nil
 }
 
@@ -124,8 +177,10 @@ func (kv *RiakKVStore) InitBackend() error {
 	return nil
 }
 
-// Close closes the connection to the backend
+// Close closes the connection to the backend and shuts down channels
 func (kv *RiakKVStore) Close() error {
+	close(kv.writeQueue)
+	kv.writeWg.Wait()
 	if kv.cluster != nil {
 		return kv.cluster.Stop()
 	}
@@ -259,6 +314,8 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 
 // PutChunk stores a chunk by its key
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
+
+	kv.chunkCache.Add(key, chunkEntry{data})
 	obj := &riak.Object{
 		Bucket:      chunkBucket,
 		BucketType:  kv.chunkBucketType,
@@ -276,14 +333,24 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 		return fmt.Errorf("failed to build store command: %w", err)
 	}
 
-	if err := kv.cluster.Execute(cmd); err != nil {
+	if err := kv.enqueue(cmd); err != nil {
 		return fmt.Errorf("failed to execute store: %w", err)
 	}
+
 	return nil
 }
 
 // Chunk retrieves a chunk by its key
 func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
+
+	// Check cache for chunk
+	if kv.chunkCache.Contains(key) {
+		dat, ok := kv.chunkCache.Get(key)
+		if ok {
+			return dat.data, nil
+		}
+	}
+
 	cmd, err := riak.NewFetchValueCommandBuilder().
 		WithBucketType(kv.chunkBucketType).
 		WithBucket(chunkBucket).
@@ -307,6 +374,9 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 
 // DeleteChunk deletes a chunk by its key
 func (kv *RiakKVStore) DeleteChunk(key uint64) error {
+
+	kv.chunkCache.Remove(key)
+
 	cmd, err := riak.NewDeleteValueCommandBuilder().
 		WithBucketType(kv.chunkBucketType).
 		WithBucket(chunkBucket).
@@ -316,9 +386,10 @@ func (kv *RiakKVStore) DeleteChunk(key uint64) error {
 		return fmt.Errorf("failed to build delete command: %w", err)
 	}
 
-	if err := kv.cluster.Execute(cmd); err != nil {
-		return fmt.Errorf("failed to execute delete: %w", err)
+	if err := kv.enqueue(cmd); err != nil {
+		return fmt.Errorf("failed to execute store: %w", err)
 	}
+
 	return nil
 }
 
