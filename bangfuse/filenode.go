@@ -185,7 +185,7 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 	}
 
 	// Populate the out fuse.AttrOut struct
-	// TODO: check if this is always supposed to be ALL the attributes or just the changed ones
+	// REVISIT: check if this is always supposed to be ALL the attributes or just the changed ones
 	MetadataToFuseAttr(inum, meta, &out.Attr)
 
 	op.Done()

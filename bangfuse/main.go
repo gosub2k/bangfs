@@ -15,7 +15,7 @@ import (
 
 // gKVStore is the package-level KVStore used by node implementations.
 // assumes that a given process will only mount one fs!
-// TODO: move into the root inode and access with .Root()
+// REVISIT: move into the root inode and access with .Root()
 var gKVStore KVStore
 var gInumgen *IdGenerator
 var gChunkidgen *IdGenerator

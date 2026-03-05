@@ -58,7 +58,7 @@ func getClientID() uint64 {
 		return bangutil.FNV64([]byte(server_id_str))
 	}
 	hostname, err := os.Hostname()
-	if err != nil { // TODO: warn that there's no client id defined
+	if err != nil { // REVISIT: warn that there's no client id defined
 		var b [8]byte
 		rand.Read(b[:])
 		return binary.NativeEndian.Uint64(b[:])

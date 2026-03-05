@@ -91,7 +91,7 @@ func (f *BangFH) appendChunk(ctx context.Context, data []byte) error {
 		op.Error(err)
 		return err
 	}
-	// TODO: decide if to undo the metadata or resync it if this fails
+	// REVISIT: decide if to undo the metadata or resync it if this fails
 	chunkrefs = append(chunkrefs, &bangpb.ChunkRef{Hash: key, Size: uint32(len(data))})
 	f.Metadata.Chunks = chunkrefs
 
@@ -194,7 +194,7 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 	//op.Debugf("Write %d bytes at offset %d to inode %d", len(data), off, f.Inum)
 
 	// Re-read metadata: Setattr (e.g. O_TRUNC truncate) may have changed it.
-	// TODO: to save an extra read call we can track filehandles in the BangFile struct.
+	// REVISIT: to save an extra read call we can track filehandles in the BangFile struct.
 	if err := f.resyncMetadata(ctx); err != nil {
 		op.Error(fmt.Errorf("resyncMetadata: %v", err))
 		return 0, syscall.EIO

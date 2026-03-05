@@ -157,7 +157,7 @@ func (o *TraceOp) Errno(errno syscall.Errno) {
 }
 
 // ErrnoName returns a human-readable name for common errno values
-// TODO: this should not duplicate the syscall package
+// REVISIT: this should not duplicate the syscall package
 func ErrnoName(errno syscall.Errno) string {
 	switch errno {
 	case 0:

@@ -596,7 +596,7 @@ TESTS = [
                "chmod 644 '{mount}/permtest.txt'; rm '{mount}/permtest.txt'",
                Expected.SUCCESS),
 
-     # TODO: fix this test, it should succeed
+     # REVISIT: fix this test, it should succeed
      #    Test("chmod 000 on file",
      #         "chmod 000 '{mount}/permtest.txt'",
      #         Expected.SUCCESS),

@@ -104,7 +104,7 @@ func (kv *RiakKVStore) InitBackend() error {
 	// Create root inode (inode 0) as empty directory
 	now := time.Now().UnixNano()
 	root_dir := &bangpb.InodeMeta{
-		Name: "", ParentInode: 0, // root is its own parent // TODO: leave out for directory?
+		Name: "", ParentInode: 0, // root is its own parent // REVISIT: leave out for directory?
 		Mode:         0755 | syscall.S_IFDIR,
 		Uid:          0,
 		Gid:          0,
@@ -134,7 +134,7 @@ func (kv *RiakKVStore) Close() error {
 
 // PutMetadata creates new metadata entries with optimistic concurrency control:
 // If the key already exists, the function will fail.
-// TODO: implement retries
+// REVISIT: implement retries
 func (kv *RiakKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byte, error) {
 
 	data, err := proto.Marshal(newMeta)
@@ -144,7 +144,7 @@ func (kv *RiakKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byt
 
 	obj := &riak.Object{
 		Bucket:      metadataBucket,
-		BucketType:  kv.metadataBucketType, // TODO: Check if passing ButcketType is redundant
+		BucketType:  kv.metadataBucketType, // REVISIT: Check if passing ButcketType is redundant
 		Key:         fmt.Sprintf("%d", key),
 		ContentType: "application/protobuf",
 		Value:       data,

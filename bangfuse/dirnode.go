@@ -61,7 +61,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 	}
 	if !IsDir(dir_meta) {
 		op.Error(fmt.Errorf("inode %d is not a directory (mode: %o)", inum, dir_meta.Mode))
-		return nil, syscall.EINVAL // TODO: approrpirate err cde
+		return nil, syscall.EINVAL // REVISIT: approrpirate err cde
 	}
 
 	// . and .. must be returned by the FUSE server; the kernel doesn't add them
@@ -73,7 +73,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 		child_meta, _, err := gKVStore.Metadata(child.Inode)
 		if err != nil {
 			op.Error(err)
-			continue // TODO: handle error
+			continue // REVISIT: handle error
 		}
 		entries = append(entries, fuse.DirEntry{
 			Ino:  child.Inode,
@@ -83,7 +83,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 	}
 
 	op.Done()
-	return fs.NewListDirStream(entries), 0 // TODO: make this an actual stream?
+	return fs.NewListDirStream(entries), 0 // REVISIT: make this an actual stream?
 }
 
 // Create creates a regular file
@@ -106,7 +106,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, flags uint32, mod
 	}
 
 	// Create a new backend metadata struct for the new file and store it in the backend.
-	now := time.Now().UnixNano() // TODO: check why time fields don't use uint64 but int64
+	now := time.Now().UnixNano() // REVISIT: check why time fields don't use uint64 but int64
 	new_inum := gInumgen.NextId()
 	new_file_meta := &bangpb.InodeMeta{
 		Name:        name,
@@ -128,7 +128,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, flags uint32, mod
 	}
 
 	// Add the new file link to the directory and try to update it.
-	// TODO: address possible condition if the directory metadata has been concurrently modified.
+	// REVISIT: address possible condition if the directory metadata has been concurrently modified.
 	dir_meta.ChildEntries = append(child_entries, &bangpb.ChildEntry{Name: name, Inode: new_inum})
 	dir_meta.MtimeNs = now
 	dir_meta.CtimeNs = now
@@ -161,7 +161,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return nil, syscall.EIO
 	}
-	// TODO: check Mkdir (and Create) should check for existing entries? or does Lookup get called?
+	// REVISIT: check Mkdir (and Create) should check for existing entries? or does Lookup get called?
 	child_entries := dir_meta.GetChildEntries()
 	for _, c := range child_entries {
 		if name == c.Name {
@@ -171,7 +171,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	}
 
 	// Create a new backend metadata struct for the new file and store it in the backend.
-	now := time.Now().UnixNano() // TODO: check why time fields don't use uint64 but int64
+	now := time.Now().UnixNano() // REVISIT: check why time fields don't use uint64 but int64
 	new_inum := gInumgen.NextId()
 	new_dir_meta := &bangpb.InodeMeta{
 		Name:         name,
@@ -192,7 +192,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	}
 
 	// Add the new file link to the directory and try to update it.
-	// TODO: address possible condition if the directory metadata has been concurrently modified.
+	// REVISIT: address possible condition if the directory metadata has been concurrently modified.
 	dir_meta.ChildEntries = append(child_entries, &bangpb.ChildEntry{Name: name, Inode: new_inum})
 	dir_meta.MtimeNs = now
 	dir_meta.CtimeNs = now
@@ -221,7 +221,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	}
 
 	// Iterate through to find the file
-	// TODO: make a more efficient data structure. This is a linear search.
+	// REVISIT: make a more efficient data structure. This is a linear search.
 	child_entries := dir_meta.GetChildEntries()
 	for _, c := range child_entries {
 		if name == c.Name {
@@ -231,7 +231,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 				op.Error(fmt.Errorf("getting metadata for found inode"))
 				return nil, syscall.EIO
 			}
-			// TODO: check why return a NewInode and set the mode and ops, maybe the number is sufficient.
+			// REVISIT: check why return a NewInode and set the mode and ops, maybe the number is sufficient.
 			if IsDir(found_meta) {
 				return d.NewInode(ctx, &BangDirNode{}, fs.StableAttr{Mode: fuse.S_IFDIR, Ino: found_inum}), 0
 			} else if IsFile(found_meta) {
@@ -251,7 +251,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	inum := d.StableAttr().Ino
 	op := bangutil.GetTracer().Op("Rmdir", inum, name)
 
-	// TODO: check if needed to verify if its a directory
+	// REVISIT: check if needed to verify if its a directory
 
 	// Read the directory children from the backend.
 	dir_meta, vclock, err := gKVStore.Metadata(inum)
@@ -259,7 +259,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return syscall.EIO
 	}
-	// TODO: check Mkdir (and Create) should check for existing entries? or does Lookup get called?
+	// REVISIT: check Mkdir (and Create) should check for existing entries? or does Lookup get called?
 	child_entries := dir_meta.GetChildEntries()
 	new_child_entries := []*bangpb.ChildEntry{}
 	found := false
@@ -288,7 +288,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTEMPTY
 	}
 
-	// TODO: correctly modify inode change time here
+	// REVISIT: correctly modify inode change time here
 	dir_meta.ChildEntries = new_child_entries
 	dir_meta.Nlink-- // removed subdir's ".." no longer points to us
 	_, err = gKVStore.UpdateMetadata(inum, dir_meta, vclock)
@@ -317,9 +317,9 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
-	// TODO: check that this is a regular file? the kernel seems to do this already.
+	// REVISIT: check that this is a regular file? the kernel seems to do this already.
 
-	// TODO: check Mkdir (and Create) should check existing entries? or does Lookup get called?
+	// REVISIT: check Mkdir (and Create) should check existing entries? or does Lookup get called?
 	child_entries := dir_meta.GetChildEntries()
 	updated_child_entries := []*bangpb.ChildEntry{}
 	found := false
@@ -338,7 +338,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	dir_meta.ChildEntries = updated_child_entries
-	//dirMeta.MtimeNs = now // TODO: check which of these to modify
+	//dirMeta.MtimeNs = now // REVISIT: check which of these to modify
 	//dirMeta.CtimeNs = now
 	_, err = gKVStore.UpdateMetadata(inum, dir_meta, vclock)
 	if err != nil {
@@ -363,7 +363,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	// Delete the file metadata itself
-	// TODO: make this work even if the file inode changed between reading and deleting it
+	// REVISIT: make this work even if the file inode changed between reading and deleting it
 	if err = gKVStore.DeleteMetadata(inum_to_delete, unlinked_file_vclock); err != nil {
 		op.Error(fmt.Errorf("deleting file metadata: %v", err))
 	}
