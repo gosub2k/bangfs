@@ -53,8 +53,8 @@ The current _implementation_ uses Riak's KV backend, but this interface could be
 Overall the designed is for
 - Use case of single writer at a time per file:
   - for example, unlike something like GFS concurrent append is not really thought through. 
-  - But this makes it convenient to use simple CAS (read, modify, write if not updated in the meantime) for metadata writes. This eliminates the need for some kind of coordination services at the cost of maybe failing some writes, orphaning chunks, and undefined effects.
-- File data writes are expected to be on the hot path - tradeoff of consistency for speed writing (eg, storing a large file without the consensus overhead of strong consistency)
+  - But this makes it convenient to use simple CAS (read, modify, write if not updated in the meantime) for metadata writes. This eliminates the need for some kind of coordination services at the cost of failing some writes, orphaning some chunks. 
+- File data writes are expected to be on the hot path - tradeoff of consistency for speed writing (eg, storing many chunks without the consensus overhead of strong consistency)
 
 
 ## Status
