@@ -43,7 +43,8 @@ func (ig *IdGenerator) NextId() uint64 {
 
 	ms_since_epoch := time.Now().UnixMilli()
 
-	return uint64(ms_since_epoch) | (seq_no << SEQ_BITS) | (ig.local_id << (TIME_BITS + SEQ_BITS))
+	time_part := uint64(ms_since_epoch) & ((1 << TIME_BITS) - 1)
+	return time_part | (seq_no << TIME_BITS) | (ig.local_id << (TIME_BITS + SEQ_BITS))
 }
 
 // =========================
