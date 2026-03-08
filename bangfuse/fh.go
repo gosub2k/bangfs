@@ -200,23 +200,24 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 		return 0, syscall.EIO
 	}
 
-	filesize := int64(f.Metadata.Size)
+	file_size := int64(f.Metadata.Size)
 
 	// O_APPEND: force offset to end of file regardless of what the kernel sent
 	if f.Flags&syscall.O_APPEND != 0 {
-		//op.Debugf("O_APPEND: adjusting offset from %d to %d", off, filesize)
-		off = filesize
+		//op.Debugf("O_APPEND: adjusting offset from %d to %d", off, file_size
+		off = file_size
+
 	}
 
 	write_end := off + int64(len(data))
 
 	// If writing past EOF, zero-fill the gap
-	if off > filesize {
-		gap := make([]byte, off-filesize)
-		if errno := f.writeAt(ctx, op, gap, filesize); errno != 0 {
+	if off > file_size {
+		gap := make([]byte, off-file_size)
+		if errno := f.writeAt(ctx, op, gap, file_size); errno != 0 {
 			return 0, errno
 		}
-		filesize = off
+		file_size = off
 	}
 
 	if errno := f.writeAt(ctx, op, data, off); errno != 0 {
@@ -225,7 +226,7 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 	}
 
 	// Update file size
-	if write_end > filesize {
+	if write_end > file_size {
 		f.Metadata.Size = uint64(write_end)
 	}
 
@@ -239,64 +240,63 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 	return uint32(len(data)), 0
 }
 
+// readInto reads len bytes from the given chunk, offset and appends it to data or returns an error
+func (f *BangFH) readInto(_ context.Context, chkidx int, off uint64, read_len uint64, out_data *[]byte) error {
+	op := bangutil.GetTracer().Op("readInto", f.Inum, "")
+	op.Debugf("readInto: chkidx: %d off: %d read_len:%d", chkidx, off, read_len)
+
+	chks := f.Metadata.Chunks
+	if chkidx >= len(chks) || chkidx < 0 {
+		err := fmt.Errorf("chunk index %d out of range (%d chunks)", chkidx, len(chks))
+		op.Error(err)
+		return err
+	}
+	key := chks[chkidx].Hash
+	chk_data, err := gKVStore.Chunk(key)
+	if err != nil {
+		op.Error(err)
+		return err
+	}
+
+	*out_data = append(*out_data, chk_data[off:off+read_len]...)
+	op.Done()
+	return nil
+}
+
 // Read reads from the file and copies the result to data
-func (f *BangFH) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (f *BangFH) Read(ctx context.Context, dest []byte, off_in int64) (fuse.ReadResult, syscall.Errno) {
 	op := bangutil.GetTracer().Op("Read", f.Inum, f.Metadata.Name)
 	//op.Debugf("Read up to %d bytes at offset %d", len(dest), off)
 
-	filesize := int64(f.Metadata.Size)
-	if off >= filesize {
+	//REVISIT: re sync metadata
+	//REVISIT: 3 different int types
+	off := uint64(off_in)
+	file_len := f.Metadata.Size
+
+	if off >= file_len {
 		//op.Debugf("offset exceeds file size (%d<%d)", len(dest), off)
 		op.Done()
 		return fuse.ReadResultData(nil), 0
 	}
 
-	// Clamp read to file size
-	end := off + int64(len(dest))
-	if end > filesize {
-		end = filesize
-	}
+	out_len := uint64(len(dest))
+	out_len = min(out_len, file_len-off)
+	out_buf := make([]byte, 0)
 
-	chks := f.Metadata.Chunks
-	buf := make([]byte, 0, end-off)
-
-	// Walk chunks, accumulating an offset to find which chunks overlap [off, end)
-	var chunk_offset int64
-	for i, chk := range chks {
-		chunk_end := chunk_offset + int64(chk.Size)
-
-		if chunk_end <= off {
-			// This chunk is entirely before the read window
-			chunk_offset = chunk_end
-			continue
+	var tot_r_len uint64 = 0
+	for tot_r_len < out_len {
+		r_off := off + tot_r_len
+		r_chkidx := int(r_off / uint64(gChunksize))
+		r_chkoffset := r_off % uint64(gChunksize)
+		r_len := min(uint64(gChunksize)-r_chkoffset, out_len-tot_r_len)
+		if err := f.readInto(ctx, r_chkidx, r_chkoffset, r_len, &out_buf); err != nil {
+			op.Errorf("readInto failed: %v", err)
+			return fuse.ReadResultData(out_buf), syscall.EIO
 		}
-		if chunk_offset >= end {
-			// Past the read window
-			break
-		}
-
-		// This chunk overlaps the read window — fetch it
-		data, err := f.readChunk(ctx, i)
-		if err != nil {
-			op.Errorf("readChunk[%d]: %v", i, err)
-			return nil, syscall.EIO
-		}
-
-		// Slice within this chunk that overlaps the read window
-		slice_start := int64(0)
-		if off > chunk_offset {
-			slice_start = off - chunk_offset
-		}
-		slice_end := int64(chk.Size)
-		if end < chunk_end {
-			slice_end = end - chunk_offset
-		}
-
-		buf = append(buf, data[slice_start:slice_end]...)
-		chunk_offset = chunk_end
+		tot_r_len += r_len
 	}
 
 	//op.Debugf("Read returning %d bytes", len(buf))
 	op.Done()
-	return fuse.ReadResultData(buf), 0
+	return fuse.ReadResultData(out_buf), 0
 }

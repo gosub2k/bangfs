@@ -7,6 +7,7 @@ package bangfuse
 import (
 	"fmt"
 	"syscall"
+
 	//"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -20,7 +21,7 @@ var gKVStore KVStore
 var gInumgen *IdGenerator
 var gChunkidgen *IdGenerator
 
-const defaultChunkSize = 1024 * 1024 // 1MB
+const defaultChunkSize = 1024 * 8 // 1024 * 1024 // 1MB
 
 var gChunksize uint32 = defaultChunkSize
 
