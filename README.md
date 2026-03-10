@@ -1,13 +1,15 @@
 # BangFS
 
-**This is an experimental project and a work in progress.** Basic single-client file operations work (see [tests](#testing) below), but there are known gaps and likely unknown ones too. The idea — a distributed filesystem backed only by a KV store, no other services — came from wanting to implement distributed systems concepts hands-on (consistency models, CAS concurrency, chunked storage) and from noticing that Riak is still actively used and could serve both roles. Design decisions are discovered as much as planned — for example, the need for a unique ID generator only became obvious after hitting collisions. The overall approach may or may not be viable at scale — early tests are promising but error handling and recovery needed for a real distributed filesystem are not built (and indeed may require more components). See [Shortcomings](#shortcomings) for an honest accounting of what's missing, and run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of what works.
-
-Experimental FUSE distributed filesystem with minimal components:
+FUSE distributed filesystem with minimal components:
 
 - A key value store for metadata.
 - A key value store for file data chunks
 - A client program
 - (Planned) - file system checker and garbage collector
+
+_This is an experimental project and a work in progress_: see [Shortcomings](#shortcomings) for what's missing, and run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of what works.
+ 
+ The idea came from wanting to implement distributed systems concepts hands-on (consistency models, CAS concurrency, chunked storage) and from noticing that Riak is still actively used and could serve both roles. Design decisions are discovered as much as planned. For example, the need for a robust unique ID generator only became obvious after hitting collisions. 
 
 ## Use case / tradeoffs
 
@@ -185,7 +187,7 @@ make integration-test
 
 ## Shortcomings
 
-This design is is viable in the happy path (see [tests](#testing)) for  single-writer, read-heavy workloads but is so far not viable for general-purpose multi-client filesystem use: 
+This design is is viable in the happy path (see [tests](#testing)) for  single-writer, read-heavy workloads but is so far not viable for general-purpose multi-client filesystem use, which would very likely require adding more components to the initial design. Some shortcomings as of this README are:
 - **No crash recovery:** chunks are written before metadata. If the metadata update fails (vclock conflict, crash, network error), orphaned chunks are never cleaned up. There is no write-ahead log.
 - **No conflict resolution:** CAS on metadata detects concurrent writes but does not retry or merge — the write is dropped and the client gets EIO.
 - **Multi-step operations are not atomic:** rename updates 3 metadata keys sequentially. A failure mid-way can leave the filesystem in an inconsistent state (eg, file removed from source directory but not added to target).
