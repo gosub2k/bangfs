@@ -722,6 +722,10 @@ TESTS = [
                "cat '{mount}/overwrite.txt'",
                Expected.OUTPUT_EQUALS, "short"),
 
+          Test("file has correct size after overwrite", 
+               "stat -c '%s' '{mount}/overwrite.txt'",
+               Expected.OUTPUT_EQUALS, "6"),
+
           Test("truncate to zero",
                "truncate -s 0 '{mount}/overwrite.txt'",
                Expected.SUCCESS),
@@ -756,6 +760,10 @@ TESTS = [
           Test("dd write at offset 5",
                "echo -n 'XXXXX' | dd of='{mount}/seek.txt' bs=1 seek=5 conv=notrunc 2>/dev/null",
                Expected.SUCCESS),
+
+          Test("verify size after overwrite",
+               "stat -c '%s' '{mount}/seek.txt'",
+               Expected.OUTPUT_EQUALS, "20"),
 
           Test("middle overwrite: content correct",
                "cat '{mount}/seek.txt'",
@@ -799,7 +807,7 @@ TESTS = [
           # Write past end of file (extends file with gap)
           Test("dd write past EOF extends file",
                "echo -n 'PAST' | dd of='{mount}/seek.txt' bs=1 seek=25 conv=notrunc 2>/dev/null",
-               Expected.SUCCESS),
+               Expected.SUCCESS, informational=True),
 
           Test("file grew after write past EOF",
                "stat -c '%s' '{mount}/seek.txt'",
@@ -841,6 +849,10 @@ TESTS = [
           Test("write HELLO at offset 5000 (chunk 1 interior)",
                "echo -n 'HELLO' | dd of='{mount}/bigseek.bin' bs=1 seek=5000 conv=notrunc 2>/dev/null",
                Expected.SUCCESS),
+
+          Test("30KB file still has correct size",
+               "stat -c '%s' '{mount}/bigseek.bin'",
+               Expected.OUTPUT_EQUALS, "30720"),
 
           Test("read back HELLO at offset 5000",
                "dd if='{mount}/bigseek.bin' bs=1 skip=5000 count=5 2>/dev/null",

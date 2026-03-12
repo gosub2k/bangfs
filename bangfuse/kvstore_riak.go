@@ -430,7 +430,7 @@ type riakDiskEntry struct {
 }
 
 // DiskUsage returns aggregate disk usage across all Riak cluster nodes.
-func (kv *RiakKVStore) DiskUsage(chunkSize uint32) (*DiskUsageInfo, error) {
+func (kv *RiakKVStore) DiskUsage(chunkSize uint64) (*DiskUsageInfo, error) {
 	client := &http.Client{Timeout: statsHTTPTimeout}
 	op := bangutil.GetTracer().Op("DiskUsage", 0, "")
 

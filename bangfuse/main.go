@@ -21,12 +21,12 @@ var gKVStore KVStore
 var gInumgen *IdGenerator
 var gChunkidgen *IdGenerator
 
-const defaultChunkSize = 1024 * 8 // 1024 * 1024 // 1MB
+const defaultChunkSize uint64 = 1024 * 8 // 1024 * 1024 // 1MB
 
-var gChunksize uint32 = defaultChunkSize
+var gChunksize uint64 = defaultChunkSize
 
-func SetChunkSize(size uint32) { gChunksize = size }
-func GetChunkSize() uint32     { return gChunksize }
+func SetChunkSize(size uint64) { gChunksize = size }
+func GetChunkSize() uint64     { return gChunksize }
 
 // BangServer wraps a FUSE server and its backend KV connection.
 type BangServer struct {

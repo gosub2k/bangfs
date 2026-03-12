@@ -23,5 +23,5 @@ type KVStore interface {
 	Chunk(key uint64) ([]byte, error)
 	DeleteChunk(key uint64) error
 	WipeBackend(w io.Writer) error
-	DiskUsage(chunkSize uint32) (*DiskUsageInfo, error)
+	DiskUsage(chunkSize uint64) (*DiskUsageInfo, error)
 }

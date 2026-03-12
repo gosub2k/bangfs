@@ -40,8 +40,8 @@ func (d *BangDirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 	out.Blocks = info.TotalChunks
 	out.Bfree = info.TotalChunks - info.UsedChunks
 	out.Bavail = out.Bfree
-	out.Bsize = GetChunkSize()
-	out.Frsize = GetChunkSize()
+	out.Bsize = uint32(GetChunkSize())
+	out.Frsize = uint32(GetChunkSize())
 	out.NameLen = 255
 	out.Files = 1 << 30 // no real inode limit in a KV backend
 	out.Ffree = 1 << 30

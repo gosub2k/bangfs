@@ -4,6 +4,7 @@ import (
 	"bangfs/bangutil"
 	"context"
 	"fmt"
+	"sync"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -14,6 +15,7 @@ import (
 
 type BangFH struct {
 	fs.FileHandle
+	mut      sync.Mutex
 	Flags    uint32
 	Inum     uint64
 	Metadata *bangpb.InodeMeta
@@ -30,74 +32,6 @@ func (f *BangFH) String() string {
 
 var _ = (fs.FileWriter)((*BangFH)(nil))
 var _ = (fs.FileReader)((*BangFH)(nil))
-
-//var _ = (fs.File)
-
-// replaceChunk replaces a chunk in the file with new data
-func (f *BangFH) replaceChunk(ctx context.Context, idx int, data []byte) error {
-	op := bangutil.GetTracer().Op("replaceChunk", f.Inum, f.Metadata.Name)
-
-	chks := f.Metadata.Chunks
-	num_chunks := len(chks)
-	if idx >= num_chunks {
-		op.Error(fmt.Errorf("chunk index %d out of range (%d chunks)", idx, num_chunks))
-		return syscall.EIO
-	}
-
-	key := gChunkidgen.NextId()
-	err := gKVStore.PutChunk(key, data)
-	if err != nil {
-		op.Error(err)
-		return err
-	}
-
-	chks[idx].Hash = key
-	chks[idx].Size = uint32(len(data))
-
-	f.Metadata.Chunks = chks
-	op.Done()
-	return nil
-}
-
-// readChunk returns the content of a chunk at index idx
-func (f *BangFH) readChunk(ctx context.Context, idx int) ([]byte, error) {
-	op := bangutil.GetTracer().Op("BangFH.readChunk", f.Inum, f.Metadata.Name)
-
-	chks := f.Metadata.Chunks
-	if idx >= len(chks) || idx < 0 {
-		err := fmt.Errorf("chunk index %d out of range (%d chunks)", idx, len(chks))
-		op.Error(err)
-		return nil, err
-	}
-	key := chks[idx].Hash
-	data, err := gKVStore.Chunk(key)
-	if err != nil {
-		op.Error(err)
-		return nil, err
-	}
-	op.Done()
-	return data, nil
-}
-
-// appendChunk appends a new chunk to the file but defers writing metadata
-func (f *BangFH) appendChunk(ctx context.Context, data []byte) error {
-	op := bangutil.GetTracer().Op("appendChunk", f.Inum, f.Metadata.Name)
-
-	chunkrefs := f.Metadata.Chunks
-
-	key := gChunkidgen.NextId()
-	err := gKVStore.PutChunk(key, data)
-	if err != nil {
-		op.Error(err)
-		return err
-	}
-	// REVISIT: decide if to undo the metadata or resync it if this fails
-	chunkrefs = append(chunkrefs, &bangpb.ChunkRef{Hash: key, Size: uint32(len(data))})
-	f.Metadata.Chunks = chunkrefs
-
-	op.Done()
-	return nil
-}
 
 // writeMeta writes the metadata to KV and updates the vclock
 func (f *BangFH) writeMeta(ctx context.Context) error {
@@ -135,61 +69,98 @@ func (f *BangFH) resyncMetadata(ctx context.Context) error {
 	return nil
 }
 
-// writeAt splices data into the file at the given offset, modifying existing
-// chunks and appending new ones as needed.
-// All chunks except the last are exactly GetChunkSize() bytes, so we use division
-// to index directly instead of walking.
-func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte, off int64) syscall.Errno {
-	chks := f.Metadata.Chunks
-	pos := off    // current file position
-	data_pos := 0 // how far into data we've consumed
+// appendAChunk appends a chunk with the given data to the end of the chunks and updates the receiver members
+func (f *BangFH) appendAChunk(ctx context.Context, data []byte) error {
 
-	for data_pos < len(data) {
-		chunk_idx := int(pos / int64(GetChunkSize()))
-		offset_in_chunk := int(pos % int64(GetChunkSize()))
+	new_chk_key := gChunkidgen.NextId()
+	new_chk_sz := uint64(len(data))
 
-		if chunk_idx < len(chks) {
-			// Overwrite within an existing chunk
-			existing, err := f.readChunk(ctx, chunk_idx)
-			if err != nil {
-				op.Errorf("readChunk[%d]: %v", chunk_idx, err)
-				return syscall.EIO
-			}
-			// Extend the chunk buffer if the write goes past its current size
-			// (can happen on the last chunk which may be shorter than GetChunkSize())
-			if offset_in_chunk+len(data)-data_pos > len(existing) && len(existing) < int(GetChunkSize()) {
-				grown := make([]byte, min(int(GetChunkSize()), offset_in_chunk+len(data)-data_pos))
-				copy(grown, existing)
-				existing = grown
-			}
-			n := copy(existing[offset_in_chunk:], data[data_pos:])
-			data_pos += n
-			pos += int64(n)
-			if err := f.replaceChunk(ctx, chunk_idx, existing); err != nil {
-				op.Errorf("replaceChunk[%d]: %v", chunk_idx, err)
-				return syscall.EIO
-			}
-		} else {
-			// Past the last chunk — append new ones
-			remaining := len(data) - data_pos
-			n := min(uint32(remaining), GetChunkSize())
-			if err := f.appendChunk(ctx, data[data_pos:data_pos+int(n)]); err != nil {
-				op.Errorf("appendChunk: %v", err)
-				return syscall.EIO
-			}
-			data_pos += int(n)
-			pos += int64(n)
-			// appendChunk updates f.Metadata.Chunks, refresh local ref
-			chks = f.Metadata.Chunks
-		}
+	if new_chk_sz > GetChunkSize() {
+		return fmt.Errorf("appendAChunk: data size > chunk size (%d>%d)", new_chk_sz, GetChunkSize())
 	}
 
-	return 0
+	if err := gKVStore.PutChunk(new_chk_key, data); err != nil {
+		return err
+	}
+
+	f.Metadata.Chunks = append(f.Metadata.Chunks, &bangpb.ChunkRef{Hash: new_chk_key, Size: new_chk_sz})
+	f.Metadata.Size += new_chk_sz
+	return nil
+}
+
+// modifyChunk modifies the chunk at given index, writes data at given offset in chunk, returns number of overlap bytes
+func (f *BangFH) modifyChunk(ctx context.Context, w_chkidx int, w_chkoffset uint64, data []byte) error {
+	op := bangutil.GetTracer().Op("modfyChunk", f.Inum, f.Metadata.Name)
+
+	// check if len is in bounds
+	if w_chkidx >= len(f.Metadata.Chunks) {
+		return fmt.Errorf("modifyChunk: chunk idx (%d) out of range (%d)", w_chkidx, len(f.Metadata.Chunks))
+	}
+
+	// check if data will fit within chunk
+	data_len := uint64(len(data))
+	if data_len+w_chkoffset > GetChunkSize() {
+		return fmt.Errorf("modifyChunk: data size (%d) + offset (%d) > chunk size (%d>%d)", data_len, w_chkoffset, data_len+w_chkoffset, GetChunkSize())
+	}
+
+	// REVISIT
+	meta_chunk_len := f.Metadata.Chunks[w_chkidx].Size
+	if w_chkoffset > meta_chunk_len {
+		return fmt.Errorf("modifyChunk: refusing to write after end of chunk: chunk_len: %d offset: %d", meta_chunk_len, w_chkoffset)
+	}
+
+	// read the chunk
+	chk_key := f.Metadata.Chunks[w_chkidx].Hash
+	chk_data, err := gKVStore.Chunk(chk_key)
+	if err != nil {
+		return err
+	}
+
+	// fix it up
+	if chunk_len := uint64(len(chk_data)); chunk_len > meta_chunk_len {
+		// Use metadata as SOT
+		chk_data = chk_data[:meta_chunk_len]
+	}
+	if chunk_len := uint64(len(chk_data)); chunk_len < meta_chunk_len {
+		// Use metadata as SOT
+		delta := meta_chunk_len - chunk_len
+		chk_data = append(chk_data, make([]byte, delta)...)
+	}
+
+	if w_chkoffset == meta_chunk_len {
+		chk_data = append(chk_data, data...)
+		f.Metadata.Size += data_len
+		f.Metadata.Chunks[w_chkidx].Size += data_len
+		op.Debugf("appended %d bytes to chunk %v", data_len, w_chkidx)
+	} else if w_chkoffset+data_len > meta_chunk_len {
+		pad_len := w_chkoffset + data_len - meta_chunk_len
+		chk_data = append(chk_data, make([]byte, pad_len)...)
+		copy(chk_data[w_chkoffset:w_chkoffset+data_len], data)
+		f.Metadata.Size += pad_len
+		f.Metadata.Chunks[w_chkidx].Size += pad_len
+		op.Debugf("write %d bytes, chunk %v  extended  %d bytes", data_len, w_chkidx, pad_len)
+	} else {
+		copy(chk_data[w_chkoffset:w_chkoffset+data_len], data)
+		op.Debugf("overwrite %d bytes chunk %v", data_len, w_chkidx)
+	}
+
+	// Write buffer back to kvstore
+	if err := gKVStore.PutChunk(chk_key, chk_data); err != nil {
+		return err
+	}
+
+	op.Done()
+	return nil
 }
 
 // Write writes to the inode at the given offset and returns the number of bytes written.
-// Handles append, overwrite, and write-past-EOF (zero-fill gap).
-func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
+// Handles append, overwrite, and write-past-EOF (zero-fill gap).\
+// Uses uint64 where possible for all calculations, but returns uint32 as required by API.
+// ie we also assume no negative offsets or writes > 2^31 bytes.
+func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, syscall.Errno) {
+	f.mut.Lock()
+	defer f.mut.Unlock()
+
 	op := bangutil.GetTracer().Op("Write", f.Inum, f.Metadata.Name)
 	//op.Debugf("Write %d bytes at offset %d to inode %d", len(data), off, f.Inum)
 
@@ -200,39 +171,60 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 		return 0, syscall.EIO
 	}
 
-	file_size := int64(f.Metadata.Size)
+	if off_in < 0 {
+		op.Error(fmt.Errorf("negative offset not supported"))
+		return 0, syscall.ENOTSUP
+	}
 
-	// O_APPEND: force offset to end of file regardless of what the kernel sent
+	w_off_st := uint64(off_in)
 	if f.Flags&syscall.O_APPEND != 0 {
-		//op.Debugf("O_APPEND: adjusting offset from %d to %d", off, file_size
-		off = file_size
-
+		w_off_st = f.Metadata.Size
 	}
+	w_off := w_off_st
+	data_off := uint64(0)
+	data_len := uint64(len(data))
 
-	write_end := off + int64(len(data))
+	for w_off-w_off_st < data_len {
 
-	// If writing past EOF, zero-fill the gap
-	if off > file_size {
-		gap := make([]byte, off-file_size)
-		if errno := f.writeAt(ctx, op, gap, file_size); errno != 0 {
-			return 0, errno
+		w_chkidx := int(w_off / GetChunkSize())
+		w_chkoffset := w_off % GetChunkSize()
+		w_len := min(GetChunkSize()-w_chkoffset, data_len-data_off)
+
+		op.Debugf("w_chkidx:%v w_chkoffset:%v w_len:%v w_off:%v w_off_st:%v (bytes written):%v data_len:%v", w_chkidx, w_chkoffset, w_len, w_off, w_off_st, w_off-w_off_st, data_len)
+
+		if w_chkidx == len(f.Metadata.Chunks) {
+			op.Debugf("appending chunk: data[%v:%v]", data_off, data_off+w_len)
+			if err := f.appendAChunk(ctx, data[data_off:data_off+w_len]); err != nil {
+				op.Error(err)
+				return uint32(w_off - w_off_st), syscall.EIO
+			}
+			data_off += w_len
+			w_off += w_len
+			continue
 		}
-		file_size = off
+		if w_chkidx < len(f.Metadata.Chunks) {
+			op.Debugf("modifying chunk: data[%v:%v]", w_off, w_off+w_len)
+
+			err := f.modifyChunk(ctx, w_chkidx, w_chkoffset, data[data_off:data_off+w_len])
+			if err != nil {
+				op.Error(err)
+				return uint32(w_off - w_off_st), syscall.EIO
+			}
+			data_off += w_len
+			w_off += w_len
+			continue
+		}
+		// error
+		op.Errorf("refusing to extend file: w_chkidx: %d out of range: %d", w_chkidx, len(f.Metadata.Chunks))
+		return uint32(w_off - w_off_st), syscall.EIO
 	}
 
-	if errno := f.writeAt(ctx, op, data, off); errno != 0 {
-		op.Errno(errno)
-		return 0, errno
-	}
+	op.Debugf("write done: w_off: %v w_off_st: %v (bytes written): %v data_len: %v", w_off, w_off_st, w_off-w_off_st, data_len)
 
-	// Update file size
-	if write_end > file_size {
-		f.Metadata.Size = uint64(write_end)
-	}
-
-	if err := f.writeMeta(ctx); err != nil {
-		op.Error(fmt.Errorf("syncing metadata (chunks and size): %v", err))
-		return 0, syscall.EIO
+	err := f.writeMeta(ctx)
+	if err != nil {
+		op.Error(err)
+		return uint32(w_off - w_off_st), syscall.EIO
 	}
 
 	//op.Debugf("Wrote %d bytes at offset %d (new size: %d)", len(data), off, f.Metadata.Size)
@@ -251,13 +243,23 @@ func (f *BangFH) readInto(_ context.Context, chkidx int, off uint64, read_len ui
 		op.Error(err)
 		return err
 	}
+	meta_chk_sz := chks[chkidx].Size
+	if off+read_len > meta_chk_sz {
+		err := fmt.Errorf("read too long: off+real_len: %v  meta_chk_sz: %v", off+read_len, meta_chk_sz)
+		op.Error(err)
+		return err
+	}
 	key := chks[chkidx].Hash
 	chk_data, err := gKVStore.Chunk(key)
 	if err != nil {
 		op.Error(err)
 		return err
 	}
-
+	chk_len := uint64(len(chk_data))
+	if off+read_len > chk_len {
+		err := fmt.Errorf("read too long for retrieved chunk: %v > %v", off+read_len, chk_len)
+		op.Error(err)
+	}
 	*out_data = append(*out_data, chk_data[off:off+read_len]...)
 	op.Done()
 	return nil
@@ -270,30 +272,32 @@ func (f *BangFH) Read(ctx context.Context, dest []byte, off_in int64) (fuse.Read
 
 	//REVISIT: re sync metadata
 	//REVISIT: 3 different int types
-	off := uint64(off_in)
+	if off_in < 0 {
+		op.Errorf("negative offset not supported: off_in: %v", off_in)
+		return fuse.ReadResultData(nil), syscall.ENOTSUP
+	}
+	file_off := uint64(off_in)
 	file_len := f.Metadata.Size
 
-	if off >= file_len {
+	if file_off >= file_len {
 		//op.Debugf("offset exceeds file size (%d<%d)", len(dest), off)
 		op.Done()
 		return fuse.ReadResultData(nil), 0
 	}
 
 	out_len := uint64(len(dest))
-	out_len = min(out_len, file_len-off)
+	out_len = min(out_len, file_len-file_off)
 	out_buf := make([]byte, 0)
 
-	var tot_r_len uint64 = 0
-	for tot_r_len < out_len {
-		r_off := off + tot_r_len
-		r_chkidx := int(r_off / uint64(gChunksize))
-		r_chkoffset := r_off % uint64(gChunksize)
-		r_len := min(uint64(gChunksize)-r_chkoffset, out_len-tot_r_len)
+	for uint64(len(out_buf)) < out_len {
+		r_off := file_off + uint64(len(out_buf))
+		r_chkidx := int(r_off / GetChunkSize())
+		r_chkoffset := r_off % GetChunkSize()
+		r_len := min(GetChunkSize()-r_chkoffset, out_len-uint64(len(out_buf)))
 		if err := f.readInto(ctx, r_chkidx, r_chkoffset, r_len, &out_buf); err != nil {
 			op.Errorf("readInto failed: %v", err)
 			return fuse.ReadResultData(out_buf), syscall.EIO
 		}
-		tot_r_len += r_len
 	}
 
 	//op.Debugf("Read returning %d bytes", len(buf))

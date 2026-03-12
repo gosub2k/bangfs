@@ -6,9 +6,8 @@ option go_package = "bangfs/proto";
 
 // ChunkRef references a chunk within a file
 message ChunkRef {
-    // uint32 index = 1;       // position in file (0-indexed)
     uint64 hash = 2;         // fnv hash of chunk content (chunk ID)
-    uint32 size = 3;        // actual size of this chunk
+    uint64 size = 3;        // actual size of this chunk
 }
 
 // Wrapper messages for oneof (repeated fields not allowed directly in oneof)
@@ -47,5 +46,5 @@ message InodeMeta {
     uint32 nlink = 11;
 
     // Filesystem-level config (only set on root inode 0)
-    uint32 block_size = 14;     // chunk/block size in bytes (default 1MB)
+    uint64 block_size = 14;     // chunk/block size in bytes (default 1MB)
 }

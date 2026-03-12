@@ -35,7 +35,7 @@ func main() {
 
 	flag.Parse()
 
-	bangfuse.SetChunkSize(uint32(*chunkSize))
+	bangfuse.SetChunkSize(uint64(*chunkSize))
 
 	if *namespace == "" {
 		log.Println("Error: -namespace is required (or set BANGFS_NAMESPACE)")

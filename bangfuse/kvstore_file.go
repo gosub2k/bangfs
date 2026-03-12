@@ -236,7 +236,7 @@ func (kv *FileKVStore) DeleteChunk(key uint64) error {
 }
 
 // DiskUsage returns disk usage of the local filesystem backing this store.
-func (kv *FileKVStore) DiskUsage(chunkSize uint32) (*DiskUsageInfo, error) {
+func (kv *FileKVStore) DiskUsage(chunkSize uint64) (*DiskUsageInfo, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(kv.baseDir, &stat); err != nil {
 		return nil, fmt.Errorf("statfs on %s: %w", kv.baseDir, err)

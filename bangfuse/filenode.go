@@ -134,7 +134,7 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 			last_idx := keep - 1
 			chunk_end := cumsz
 			chunk_start := chunk_end - uint64(chkrefs[last_idx].Size)
-			new_chunk_size := uint32(sz - chunk_start)
+			new_chunk_size := sz - chunk_start
 			if new_chunk_size < chkrefs[last_idx].Size {
 				// Read the chunk, truncate it, write it back
 				data, err := gKVStore.Chunk(chkrefs[last_idx].Hash)
