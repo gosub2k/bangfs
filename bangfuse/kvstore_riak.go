@@ -36,6 +36,16 @@ const cacheEntryTimeout = 500 * time.Millisecond
 // that supports byte-size limits (e.g. ristretto, groupcache).
 const cacheSize = 500 * 1024 * 1024 // 500 MB
 
+// RiakKVStoreOptions holds configuration for creating a RiakKVStore.
+type RiakKVStoreOptions struct {
+	Host      string // Riak host address
+	Port      uint16 // Riak protobuf port
+	Namespace string // bucket type namespace prefix
+	HTTPPort  uint16 // Riak HTTP API port for stats (default 8098)
+	DataPath  string // preferred disk mount point for df (default "/data")
+	UseCache  bool   // enable write-back cache
+}
+
 // RiakKVStore holds a connection to the Riak backend
 type RiakKVStore struct {
 	metadataBucketType string
@@ -105,25 +115,25 @@ func (kv *RiakKVStore) flush(keys []uint64) error {
 }
 
 // NewRiakKVStore creates a new KVStore instance.
-// httpPort and dataPath are used for DiskUsage (df support).
-// Pass 0 and "" respectively for defaults.
-func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16, dataPath string, useCache bool) (*RiakKVStore, error) {
+func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
+	httpPort := opts.HTTPPort
 	if httpPort == 0 {
 		httpPort = 8098
 	}
+	dataPath := opts.DataPath
 	if dataPath == "" {
 		dataPath = "/data"
 	}
 	kv := &RiakKVStore{
-		metadataBucketType: namespace + "_bangfs_metadata",
-		chunkBucketType:    namespace + "_bangfs_chunks",
-		host:               host,
-		pb_port:            port,
+		metadataBucketType: opts.Namespace + "_bangfs_metadata",
+		chunkBucketType:    opts.Namespace + "_bangfs_chunks",
+		host:               opts.Host,
+		pb_port:            opts.Port,
 		httpPort:           httpPort,
 		dataPath:           dataPath,
-		useCache:           useCache,
+		useCache:           opts.UseCache,
 	}
-	if useCache {
+	if opts.UseCache {
 		kv.wbcache.evictErr = make(chan error, 16)
 		kv.wbcache.cache = expirable.NewLRU[uint64, cacheEntry](cacheSize, func(key uint64, val cacheEntry) {
 			if val.dirty {

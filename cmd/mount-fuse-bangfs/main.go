@@ -92,7 +92,13 @@ func main() {
 			os.Exit(1)
 		}
 		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace, uint16(*httpPort), *dataPath)
+		rkv, err := bangfuse.NewRiakKVStore(bangfuse.RiakKVStoreOptions{
+			Host:      *host,
+			Port:      uint16(*port),
+			Namespace: *namespace,
+			HTTPPort:  uint16(*httpPort),
+			DataPath:  *dataPath,
+		})
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}
