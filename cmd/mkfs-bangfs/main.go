@@ -62,6 +62,7 @@ func main() {
 			Host:      *host,
 			Port:      uint16(*port),
 			Namespace: *namespace,
+			UseCache:  false,
 		})
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
