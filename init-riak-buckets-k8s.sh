@@ -7,7 +7,7 @@
 set -e
 
 if [[ -z "$BANGFS_NAMESPACE" ]]; then BANGFS_NAMESPACE="${1:-test}"; fi
-if [[ -z "$BANGFS_K8S_NAMESPACE" ]]; then BANGFS_K8S_NAMESPACE="${2:-bangfs}"; fi
+if [[ -z "$BANGFS_K8S_NAMESPACE" ]]; then BANGFS_K8S_NAMESPACE="${2:-riak}"; fi
 if [[ -z "$BANGFS_K8S_SERVICE" ]]; then BANGFS_K8S_SERVICE="riak"; fi
 
 echo "Initializing BangFS bucket types with prefix: $BANGFS_NAMESPACE"
@@ -25,7 +25,12 @@ create_bucket_type() {
 
 # For single-node testing, use n_val=1, w=1, r=1
 # For production, increase n_val and use consistent=true with proper quorum
-create_bucket_type "${BANGFS_NAMESPACE}_bangfs_metadata" '{"props":{"n_val":1,"w":1,"r":1}}'
-create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"n_val":1,"w":1,"r":1}}'
+# create_bucket_type "${BANGFS_NAMESPACE}_bangfs_metadata" '{"props":{"n_val":1,"w":1,"r":1}}'
+# create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"n_val":1,"w":1,"r":1}}'
+
+create_bucket_type "${BANGFS_NAMESPACE}_bangfs_metadata" '{"props":{"consistent":true}}'
+# r=1, w=all ensures read-your-own-writes consistency: writing to all replicas
+# guarantees any subsequent read (from any single replica) sees the latest write.
+create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"r":1,"w":"all"}}'
 
 echo "Bucket types initialized successfully!"
