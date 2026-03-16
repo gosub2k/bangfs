@@ -244,6 +244,7 @@ func (f *BangFH) readInto(_ context.Context, chkidx int, off uint64, read_len ui
 	if off+read_len > chk_len {
 		err := fmt.Errorf("read too long for retrieved chunk: %v > %v", off+read_len, chk_len)
 		op.Error(err)
+		return err
 	}
 	*out_data = append(*out_data, chk_data[off:off+read_len]...)
 	op.Done()
