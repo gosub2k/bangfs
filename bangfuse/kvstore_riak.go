@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 
 	bangpb "bangfs/proto"
 
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
+
 	"bangfs/bangutil"
 )
 
@@ -21,6 +24,17 @@ const metadataBucket = "metadata"
 const chunkBucket = "chunks"
 
 const statsHTTPTimeout = 5 * time.Second
+
+const cacheScanMS = 100 * time.Millisecond
+// TODO: consider separate TTL strategy for dirty vs clean entries. Dirty entries
+// should be flushed promptly (sub-second background loop) but not evicted by TTL.
+// Read-cached (clean) entries should have a longer TTL to benefit read workloads.
+const cacheEntryTimeout = 500 * time.Millisecond
+
+// TODO: cacheSize is passed as max entry count to expirable.NewLRU, not bytes.
+// Either compute entry count (cacheSize / chunkSize) or switch to a cache lib
+// that supports byte-size limits (e.g. ristretto, groupcache).
+const cacheSize = 500 * 1024 * 1024 // 500 MB
 
 // RiakKVStore holds a connection to the Riak backend
 type RiakKVStore struct {
@@ -31,12 +45,69 @@ type RiakKVStore struct {
 	pb_port            uint16
 	httpPort           uint16 // Riak HTTP API port for stats (default 8098)
 	dataPath           string // preferred disk mount point for df (default "/data")
+	useCache           bool
+	wbcache            localRWCache
+}
+
+type cacheEntry struct {
+	data  []byte
+	dirty bool
+}
+
+type localRWCache struct {
+	flushlock sync.RWMutex
+	cache     *expirable.LRU[uint64, cacheEntry]
+	evictErr  chan error
+}
+
+func (c *localRWCache) add(key uint64, data []byte, dirty bool) {
+	if c.cache == nil {
+		return
+	}
+	c.flushlock.Lock()
+	defer c.flushlock.Unlock()
+	c.cache.Add(key, cacheEntry{data: data, dirty: dirty})
+}
+
+// TODO: get() promotes the entry in LRU order via cache.Get(). This can race
+// with flush() which iterates entries under flushlock. Take flushlock.RLock()
+// here to prevent mid-flush LRU reordering.
+func (c *localRWCache) get(key uint64) (cacheEntry, bool) {
+	if c.cache == nil {
+		return cacheEntry{}, false
+	}
+	return c.cache.Get(key)
+}
+
+func (c *localRWCache) peek(key uint64) (cacheEntry, bool) {
+	if c.cache == nil {
+		return cacheEntry{}, false
+	}
+	return c.cache.Peek(key)
+}
+
+func (kv *RiakKVStore) flush(keys []uint64) error {
+	if !kv.useCache {
+		return nil
+	}
+	kv.wbcache.flushlock.Lock()
+	defer kv.wbcache.flushlock.Unlock()
+	for _, k := range keys {
+		entry, ok := kv.wbcache.cache.Get(k)
+		if ok && entry.dirty {
+			if err := kv.PutChunk(k, entry.data); err != nil {
+				return err
+			}
+
+		}
+	}
+	return nil
 }
 
 // NewRiakKVStore creates a new KVStore instance.
 // httpPort and dataPath are used for DiskUsage (df support).
 // Pass 0 and "" respectively for defaults.
-func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16, dataPath string) (*RiakKVStore, error) {
+func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16, dataPath string, useCache bool) (*RiakKVStore, error) {
 	if httpPort == 0 {
 		httpPort = 8098
 	}
@@ -50,6 +121,22 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 		pb_port:            port,
 		httpPort:           httpPort,
 		dataPath:           dataPath,
+		useCache:           useCache,
+	}
+	if useCache {
+		kv.wbcache.evictErr = make(chan error, 16)
+		kv.wbcache.cache = expirable.NewLRU[uint64, cacheEntry](cacheSize, func(key uint64, val cacheEntry) {
+			if val.dirty {
+				// TODO: on PutChunk failure, consider re-inserting the entry into
+				// a retry queue so dirty data isn't lost on transient errors.
+				if err := kv.PutChunk(key, val.data); err != nil {
+					select {
+					case kv.wbcache.evictErr <- err:
+					default:
+					}
+				}
+			}
+		}, cacheEntryTimeout)
 	}
 	if err := kv.Connect(); err != nil {
 		return kv, err // for latter printing of the values

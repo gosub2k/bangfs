@@ -147,6 +147,9 @@ func (f *BangFH) modifyChunk(ctx context.Context, w_chkidx int, w_chkoffset uint
 }
 
 // Write writes data at off_in, handling append/overwrite/extend. Returns bytes written.
+// TODO: check evictErr from the write-back cache before proceeding. Surface
+// errors from a previous async eviction write here (or track an error flag on
+// BangFH and poison the handle so all subsequent ops fail).
 func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, syscall.Errno) {
 	f.mut.Lock()
 	defer f.mut.Unlock()
@@ -286,3 +289,11 @@ func (f *BangFH) Read(ctx context.Context, dest []byte, off_in int64) (fuse.Read
 	op.Done()
 	return fuse.ReadResultData(out_buf), 0
 }
+// test
+// test
+// test comment
+// test
+// test
+// test
+// test
+// test

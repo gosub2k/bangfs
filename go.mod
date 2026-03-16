@@ -5,6 +5,7 @@ go 1.21
 require (
 	github.com/basho/riak-go-client v1.7.0
 	github.com/hanwen/go-fuse/v2 v2.4.2
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	google.golang.org/protobuf v1.32.0
 )
 
