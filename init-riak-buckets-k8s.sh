@@ -29,8 +29,8 @@ create_bucket_type() {
 # create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"n_val":1,"w":1,"r":1}}'
 
 create_bucket_type "${BANGFS_NAMESPACE}_bangfs_metadata" '{"props":{"consistent":true}}'
-# r=1, w=all ensures read-your-own-writes consistency: writing to all replicas
+# r=1, w=all, allow_mult=false ensures read-your-own-writes consistency: writing to all replicas
 # guarantees any subsequent read (from any single replica) sees the latest write.
-create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"r":1,"w":"all"}}'
+create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"r":1,"w":"all","allow_mult":false}}'
 
 echo "Bucket types initialized successfully!"

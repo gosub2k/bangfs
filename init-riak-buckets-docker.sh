@@ -21,9 +21,9 @@ create_bucket_type() {
     docker exec "$RIAK_CONTAINER" riak-admin bucket-type activate "$name"
 }
 
-# Single-node testing, uses n_val=3, w=3, r=1 to check read-after-write from a single client
+# Single-node testing, uses n_val=3, w=3, r=1, allow_mult=false to check read-after-write from a single client
 # For production, use consistent=true with proper quorum
 create_bucket_type "${BANGFS_NAMESPACE}_bangfs_metadata" '{"props":{"n_val":3,"w":3,"r":1}}'
-create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"n_val":1,"w":1,"r":1}}'
+create_bucket_type "${BANGFS_NAMESPACE}_bangfs_chunks" '{"props":{"n_val":1,"w":1,"r":1,"allow_mult":false}}'
 
 echo "Bucket types initialized successfully!"
