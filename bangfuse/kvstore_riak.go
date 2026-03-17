@@ -61,6 +61,7 @@ type localRWCache struct {
 	flushlock sync.RWMutex
 	cache     *expirable.LRU[uint64, cacheEntry]
 	evictErr  chan error
+	stopFlush chan struct{}
 }
 
 func (c *localRWCache) add(key uint64, data []byte, dirty bool) {
@@ -88,6 +89,22 @@ func (c *localRWCache) peek(key uint64) (cacheEntry, bool) {
 	return c.cache.Peek(key)
 }
 
+// dirtyKeys returns all keys in the cache that are marked dirty.
+// Caller must hold flushlock.
+func (c *localRWCache) dirtyKeys() []uint64 {
+	if c.cache == nil {
+		return nil
+	}
+	var dirty []uint64
+	for _, k := range c.cache.Keys() {
+		if entry, ok := c.cache.Peek(k); ok && entry.dirty {
+			dirty = append(dirty, k)
+		}
+	}
+	return dirty
+}
+
+// flush writes dirty cache entries for the given keys to the backend.
 func (kv *RiakKVStore) flush(keys []uint64) error {
 	if !kv.useCache {
 		return nil
@@ -95,15 +112,50 @@ func (kv *RiakKVStore) flush(keys []uint64) error {
 	kv.cache.flushlock.Lock()
 	defer kv.cache.flushlock.Unlock()
 	for _, k := range keys {
-		entry, ok := kv.cache.cache.Get(k)
+		entry, ok := kv.cache.cache.Peek(k)
 		if ok && entry.dirty {
 			if err := kv.PutChunk(k, entry.data); err != nil {
 				return err
 			}
-
+			// mark clean after successful write
+			kv.cache.cache.Add(k, cacheEntry{data: entry.data, dirty: false})
 		}
 	}
 	return nil
+}
+
+// flushAllDirty writes all dirty cache entries to the backend.
+func (kv *RiakKVStore) flushAllDirty() error {
+	if !kv.useCache {
+		return nil
+	}
+	kv.cache.flushlock.Lock()
+	dirty := kv.cache.dirtyKeys()
+	kv.cache.flushlock.Unlock()
+	return kv.flush(dirty)
+}
+
+// startPeriodicFlush launches a goroutine that periodically flushes all dirty
+// cache entries to the backend. Stop it by closing kv.cache.stopFlush.
+func (kv *RiakKVStore) startPeriodicFlush(interval time.Duration) {
+	kv.cache.stopFlush = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := kv.flushAllDirty(); err != nil {
+					select {
+					case kv.cache.evictErr <- err:
+					default:
+					}
+				}
+			case <-kv.cache.stopFlush:
+				return
+			}
+		}
+	}()
 }
 
 // NewRiakKVStore creates a new KVStore instance.
@@ -140,6 +192,9 @@ func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
 				}
 			}
 		}, cacheEntryTimeout)
+	}
+	if opts.UseCache {
+		kv.startPeriodicFlush(cacheEntryTimeout / 2)
 	}
 	if err := kv.Connect(); err != nil {
 		return kv, err // for latter printing of the values
@@ -216,6 +271,13 @@ func (kv *RiakKVStore) InitBackend() error {
 
 // Close closes the connection to the backend
 func (kv *RiakKVStore) Close() error {
+	if kv.cache.stopFlush != nil {
+		close(kv.cache.stopFlush)
+	}
+	// flush remaining dirty entries before shutting down
+	if kv.useCache {
+		_ = kv.flushAllDirty()
+	}
 	if kv.cluster != nil {
 		return kv.cluster.Stop()
 	}

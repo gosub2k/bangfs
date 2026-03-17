@@ -1,4 +1,4 @@
-.PHONY: clean install-tools all test build unit-test integration-test multiclient-test
+.PHONY: clean install-tools all test build unit-test dummy-test integration-test
 
 # Default target: build all binaries
 .DEFAULT_GOAL := build
@@ -31,20 +31,18 @@ clean:
 install-tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 
-test: unit-test
+# All tests in dummy mode (no external deps)
+test: unit-test dummy-test
 
-test-all: test integration-test
-
-# Unit tests (no external deps, uses FileKVStore)
+# Go unit tests
 unit-test: build
 	go test -v ./bangfuse/
+
+# Full test suite against file-backed store (includes multi-client)
+dummy-test: build
 	cd test && python3 test_bangfs.py --dummy
 
-# Integration tests (requires running Riak instance)
+# Full test suite against Riak (includes multi-client)
 # Set RIAK_HOST, RIAK_PORT, BANGFS_NAMESPACE env vars or use defaults
 integration-test: build
 	cd test && python3 test_bangfs.py
-
-# Multi-client tests (two mounts, same backend, eventual consistency)
-multiclient-test: build
-	cd test && python3 test_multiclient.py
