@@ -114,7 +114,7 @@ func (kv *RiakKVStore) flush(keys []uint64) error {
 	for _, k := range keys {
 		entry, ok := kv.cache.cache.Peek(k)
 		if ok && entry.dirty {
-			if err := kv.PutChunk(k, entry.data); err != nil {
+			if err := kv.putChunkToBackend(k, entry.data); err != nil {
 				return err
 			}
 			// mark clean after successful write
@@ -201,9 +201,9 @@ func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
 		num_cache_entries := int(cacheSizeMB / GetChunkSize())
 		kv.cache.cache = expirable.NewLRU(num_cache_entries, func(key uint64, val cacheEntry) {
 			if val.dirty {
-				// REVISIT: on PutChunk failure, consider re-inserting the entry into
+				// REVISIT: on failure, consider re-inserting the entry into
 				// a retry queue so dirty data isn't lost on transient errors.
-				if err := kv.PutChunk(key, val.data); err != nil {
+				if err := kv.putChunkToBackend(key, val.data); err != nil {
 					select {
 					case kv.cache.evictErr <- err:
 					default:
@@ -428,12 +428,8 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	return nil
 }
 
-// PutChunk stores a chunk by its key
-func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
-
-	// update cache
-	// ... only
-
+// putChunkToBackend writes a chunk directly to Riak, bypassing the cache.
+func (kv *RiakKVStore) putChunkToBackend(key uint64, data []byte) error {
 	obj := &riak.Object{
 		Bucket:      chunkBucket,
 		BucketType:  kv.chunkBucketType,
@@ -457,12 +453,8 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 	return nil
 }
 
-// Chunk retrieves a chunk by its key
-func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
-
-	// check in cache
-	// write back / through into vache
-
+// chunkFromBackend reads a chunk directly from Riak, bypassing the cache.
+func (kv *RiakKVStore) chunkFromBackend(key uint64) ([]byte, error) {
 	cmd, err := riak.NewFetchValueCommandBuilder().
 		WithBucketType(kv.chunkBucketType).
 		WithBucket(chunkBucket).
@@ -482,6 +474,16 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 	}
 
 	return fvc.Response.Values[0].Value, nil
+}
+
+// PutChunk stores a chunk by its key
+func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
+	return kv.putChunkToBackend(key, data)
+}
+
+// Chunk retrieves a chunk by its key
+func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
+	return kv.chunkFromBackend(key)
 }
 
 // DeleteChunk deletes a chunk by its key
