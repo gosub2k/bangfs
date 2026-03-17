@@ -158,6 +158,25 @@ func (kv *RiakKVStore) startPeriodicFlush(interval time.Duration) {
 	}()
 }
 
+// FlushChunks writes dirty cached chunks for the given keys to the backend.
+func (kv *RiakKVStore) FlushChunks(keys []uint64) error {
+	return kv.flush(keys)
+}
+
+// DrainEvictErrors returns the first error from async cache eviction writes,
+// or nil if the error queue is empty.
+func (kv *RiakKVStore) DrainEvictErrors() error {
+	if !kv.useCache {
+		return nil
+	}
+	select {
+	case err := <-kv.cache.evictErr:
+		return err
+	default:
+		return nil
+	}
+}
+
 // NewRiakKVStore creates a new KVStore instance.
 func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
 	httpPort := opts.HTTPPort

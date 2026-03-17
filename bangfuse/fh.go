@@ -32,6 +32,7 @@ func (f *BangFH) String() string {
 
 var _ = (fs.FileWriter)((*BangFH)(nil))
 var _ = (fs.FileReader)((*BangFH)(nil))
+var _ = (fs.FileFlusher)((*BangFH)(nil))
 
 // writeMeta writes the metadata to KV and updates the vclock
 func (f *BangFH) writeMeta(ctx context.Context) error {
@@ -215,6 +216,38 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, 
 
 	op.Done()
 	return uint32(len(data)), 0
+}
+
+// Flush is called on every close(2) of a file descriptor. It flushes dirty
+// cached chunks belonging to this file and surfaces any async eviction errors.
+func (f *BangFH) Flush(ctx context.Context) syscall.Errno {
+	rkv, ok := gKVStore.(*RiakKVStore)
+	if !ok || !rkv.useCache {
+		return 0
+	}
+
+	op := bangutil.GetTracer().Op("Flush", f.Inum, f.Metadata.Name)
+
+	if err := rkv.DrainEvictErrors(); err != nil {
+		op.Error(fmt.Errorf("eviction write error: %w", err))
+		return syscall.EIO
+	}
+
+	keys := make([]uint64, len(f.Metadata.Chunks))
+	for i, chk := range f.Metadata.Chunks {
+		keys[i] = chk.Hash
+	}
+
+	if len(keys) > 0 {
+		op.Debugf("flushing %d chunks", len(keys))
+		if err := rkv.FlushChunks(keys); err != nil {
+			op.Error(fmt.Errorf("flush chunks: %w", err))
+			return syscall.EIO
+		}
+	}
+
+	op.Done()
+	return 0
 }
 
 // readInto reads len bytes from the given chunk, offset and appends it to data or returns an error

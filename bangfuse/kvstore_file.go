@@ -56,6 +56,7 @@ func (kv *FileKVStore) Close() error {
 	return nil
 }
 
+
 func (kv *FileKVStore) InitBackend() error {
 	existing, _, err := kv.Metadata(0)
 	if err == nil && existing != nil {
