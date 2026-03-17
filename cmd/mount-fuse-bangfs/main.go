@@ -39,6 +39,7 @@ func main() {
 	}
 	httpPort := flag.Uint("http-port", httpPortDefault, "Riak HTTP port for stats/df (env: RIAK_HTTP_PORT)")
 	dataPath := flag.String("data-path", envOrDefault("BANGFS_DATA_PATH", "/data"), "Preferred disk mount path for df (env: BANGFS_DATA_PATH)")
+	nocache := flag.Bool("nocache", false, "Disable write-back cache (Riak only)")
 	trace := flag.Bool("trace", false, "Enable tracing output for debugging")
 	tracedebug := flag.Bool("tracedebug", false, "Enable debug-level tracing (implies -trace)")
 	tracelog := flag.String("tracelog", "", "Write trace output to file instead of stderr")
@@ -102,6 +103,7 @@ func main() {
 			Namespace: *namespace,
 			HTTPPort:  uint16(*httpPort),
 			DataPath:  *dataPath,
+			UseCache:  !*nocache,
 		})
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
