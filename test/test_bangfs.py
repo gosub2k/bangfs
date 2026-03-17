@@ -34,22 +34,15 @@ from pathlib import Path
 from typing import Callable, Optional
 from enum import Enum
 
-# Colors
-RED = "\033[91m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-BLUE = "\033[94m"
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
+from bangfs_test_common import (
+    RED, GREEN, YELLOW, BLUE, RESET, BOLD, DIM,
+    DEFAULT_RIAK_HOST, DEFAULT_RIAK_PORT, DEFAULT_NAMESPACE, TMPDIR,
+    run_command, go_run, log_info, log_warn, log_error,
+    BangFSSetup,
+)
 
-# Configuration defaults
-DEFAULT_RIAK_HOST = "172.17.0.2"
-DEFAULT_RIAK_PORT = "8087"
-DEFAULT_NAMESPACE = "foobar"
 DEFAULT_MOUNTPOINT = os.path.join(tempfile.gettempdir(), "bangfs")
 TRACE_LOG = os.path.join(tempfile.gettempdir(), "bangfs-trace.log")
-TMPDIR = tempfile.gettempdir()
 TEST_TRACE = os.environ.get("BANGFS_TEST_TRACE", "0") not in ("0", "", "false", "no")
 TEST_NOSKIP = os.environ.get("BANGFS_TEST_NOSKIP", "0") not in ("0", "", "false", "no")
 TEST_PHASE = os.environ.get("BANGFS_TEST_PHASE", "")
@@ -1039,19 +1032,6 @@ class TraceReader:
 trace_reader: Optional[TraceReader] = None
 
 
-def run_command(cmd: str, timeout: int = 30) -> tuple[bool, str, str]:
-    """Run a shell command, return (success, stdout, stderr)"""
-    try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout
-        )
-        return (result.returncode == 0, result.stdout.strip(), result.stderr.strip())
-    except subprocess.TimeoutExpired:
-        return (False, "", "TIMEOUT")
-    except Exception as e:
-        return (False, "", str(e))
-
-
 def run_test(test: Test, mount: str) -> bool:
     """Run a single test, return True if passed"""
     # Substitute {mount} in command
@@ -1132,147 +1112,13 @@ def run_test(test: Test, mount: str) -> bool:
 # SETUP / TEARDOWN
 # ============================================================================
 
-class BangFSSetup:
-    """Handles setup and teardown of BangFS for testing"""
-
-    def __init__(self, host: str, port: str, namespace: str, mountpoint: str, dummy: bool = False):
-        self.host = host
-        self.port = port
-        self.namespace = namespace
-        self.mountpoint = mountpoint
-        self.dummy = dummy
-        self.project_root = Path(__file__).parent.parent
-
-    def log_info(self, msg: str):
-        print(f"{GREEN}[INFO]{RESET} {msg}")
-
-    def log_warn(self, msg: str):
-        print(f"{YELLOW}[WARN]{RESET} {msg}")
-
-    def log_error(self, msg: str):
-        print(f"{RED}[ERROR]{RESET} {msg}")
-
-    def is_mounted(self) -> bool:
-        """Check if mountpoint is currently mounted"""
-        try:
-            result = subprocess.run(
-                ["mountpoint", "-q", self.mountpoint],
-                capture_output=True
-            )
-            return result.returncode == 0
-        except FileNotFoundError:
-            # mountpoint command not available, try /proc/mounts
-            try:
-                with open("/proc/mounts") as f:
-                    return any(self.mountpoint in line for line in f)
-            except:
-                return False
-
-    def go_run(self, cmd: str, args: list[str]) -> subprocess.CompletedProcess:
-        """Run a Go command using 'go run'"""
-        return subprocess.run(
-            ["go", "run", f"./cmd/{cmd}", *args],
-            cwd=self.project_root,
-            capture_output=True,
-            text=True
-        )
-
-    def unmount(self):
-        """Unmount the filesystem if mounted"""
-        if self.is_mounted():
-            self.log_info(f"Unmounting {self.mountpoint}...")
-            # Try fusermount first, then umount
-            result = subprocess.run(
-                ["fusermount", "-u", self.mountpoint],
-                capture_output=True
-            )
-            if result.returncode != 0:
-                subprocess.run(["umount", self.mountpoint], capture_output=True)
-            time.sleep(1)
-
-    def cleanup_mountpoint(self):
-        """Remove the mountpoint directory"""
-        if os.path.isdir(self.mountpoint):
-            try:
-                os.rmdir(self.mountpoint)
-            except OSError:
-                pass  # Directory not empty or other issue
-
-    def _backend_args(self) -> list[str]:
-        """Return backend flags: either -dummy or -host/-port"""
-        if self.dummy:
-            return ["-dummy"]
-        return ["-host", self.host, "-port", self.port]
-
-    def wipe_filesystem(self):
-        """Wipe existing filesystem from backend"""
-        self.log_info(f"Wiping existing filesystem (namespace={self.namespace})...")
-        result = self.go_run("reformat-bangfs", [
-            *self._backend_args(),
-            "-namespace", self.namespace,
-            "-force"
-        ])
-        if result.returncode != 0:
-            self.log_warn("No existing filesystem to wipe (or wipe failed)")
-        for line in result.stderr.split('\n'):
-            if line != "":
-               self.log_info(f"{DIM}l{line}{RESET}")
-            
-    def create_filesystem(self):
-        """Create a new filesystem in the backend"""
-        self.log_info(f"Creating filesystem (namespace={self.namespace})...")
-        result = self.go_run("mkfs-bangfs", [
-            *self._backend_args(),
-            "-namespace", self.namespace
-        ])
-        if result.returncode != 0:
-            self.log_error(f"Failed to create filesystem: {result.stderr}")
-            raise RuntimeError("Failed to create filesystem")
-        self.log_info("Filesystem created")
+class TracedBangFSSetup(BangFSSetup):
+    """BangFSSetup with trace reader initialization for the single-client test suite."""
 
     def mount_filesystem(self):
-        """Mount the filesystem in daemon mode"""
         global trace_reader
-        self.log_info(f"Creating mountpoint {self.mountpoint}...")
-        os.makedirs(self.mountpoint, exist_ok=True)
-
-        trace_reader = TraceReader(TRACE_LOG)
-
-        self.log_info("Mounting filesystem in daemon mode...")
-        mount_args = [
-            *self._backend_args(),
-            "-namespace", self.namespace,
-            "-mount", self.mountpoint,
-            "-daemon",
-            "-trace",
-            "-tracelog", TRACE_LOG,
-        ]
-        result = self.go_run("mount-fuse-bangfs", mount_args)
-        if result.returncode != 0:
-            self.log_error(f"Mount failed: {result.stderr}")
-            raise RuntimeError("Mount failed")
-
-        # Wait for mount to be ready
-        time.sleep(2)
-
-        if not self.is_mounted():
-            self.log_error("Mount failed - filesystem not mounted")
-            raise RuntimeError("Mount verification failed")
-
-        self.log_info(f"Filesystem mounted at {self.mountpoint}")
-
-    def setup(self):
-        """Full setup: create, mount"""
-        self.create_filesystem()
-        self.mount_filesystem()
-
-    def teardown(self):
-        """Full teardown: unmount"""
-        self.log_info("Tearing down...")
-        self.unmount()
-        # self.cleanup_mountpoint()
-        self.wipe_filesystem()
-        self.log_info("Teardown complete")
+        trace_reader = TraceReader(self.trace_log or TRACE_LOG)
+        super().mount_filesystem()
 
 
 # ============================================================================
@@ -1396,7 +1242,8 @@ Examples:
         do_setup = not args.no_setup
         do_teardown = not args.no_teardown
 
-    setup = BangFSSetup(args.host, args.port, args.namespace, mount, dummy=args.dummy)
+    setup = TracedBangFSSetup(args.host, args.port, args.namespace, mount,
+                              dummy=args.dummy, trace_log=TRACE_LOG)
 
     # Register signal handler for cleanup
     def signal_handler(sig, frame):

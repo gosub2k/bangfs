@@ -1,4 +1,4 @@
-.PHONY: clean install-tools all test build unit-test integration-test
+.PHONY: clean install-tools all test build unit-test integration-test multiclient-test
 
 # Default target: build all binaries
 .DEFAULT_GOAL := build
@@ -44,3 +44,7 @@ unit-test: build
 # Set RIAK_HOST, RIAK_PORT, BANGFS_NAMESPACE env vars or use defaults
 integration-test: build
 	cd test && python3 test_bangfs.py
+
+# Multi-client tests (two mounts, same backend, eventual consistency)
+multiclient-test: build
+	cd test && python3 test_multiclient.py

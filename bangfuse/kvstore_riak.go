@@ -26,15 +26,13 @@ const chunkBucket = "chunks"
 const statsHTTPTimeout = 5 * time.Second
 
 const cacheScanMS = 100 * time.Millisecond
+
 // TODO: consider separate TTL strategy for dirty vs clean entries. Dirty entries
 // should be flushed promptly (sub-second background loop) but not evicted by TTL.
 // Read-cached (clean) entries should have a longer TTL to benefit read workloads.
 const cacheEntryTimeout = 500 * time.Millisecond
 
-// TODO: cacheSize is passed as max entry count to expirable.NewLRU, not bytes.
-// Either compute entry count (cacheSize / chunkSize) or switch to a cache lib
-// that supports byte-size limits (e.g. ristretto, groupcache).
-const cacheSize = 500 * 1024 * 1024 // 500 MB
+const cacheSizeMB = 500 * 1024 * 1024 // 500 MB
 
 // RiakKVStoreOptions holds configuration for creating a RiakKVStore.
 type RiakKVStoreOptions struct {
@@ -79,13 +77,12 @@ func (c *localRWCache) add(key uint64, data []byte, dirty bool) {
 	c.cache.Add(key, cacheEntry{data: data, dirty: dirty})
 }
 
-// TODO: get() promotes the entry in LRU order via cache.Get(). This can race
-// with flush() which iterates entries under flushlock. Take flushlock.RLock()
-// here to prevent mid-flush LRU reordering.
 func (c *localRWCache) get(key uint64) (cacheEntry, bool) {
 	if c.cache == nil {
 		return cacheEntry{}, false
 	}
+	c.flushlock.Lock()
+	defer c.flushlock.Unlock()
 	return c.cache.Get(key)
 }
 
@@ -135,7 +132,8 @@ func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
 	}
 	if opts.UseCache {
 		kv.wbcache.evictErr = make(chan error, 16)
-		kv.wbcache.cache = expirable.NewLRU[uint64, cacheEntry](cacheSize, func(key uint64, val cacheEntry) {
+		num_cache_entries := int(cacheSizeMB / GetChunkSize())
+		kv.wbcache.cache = expirable.NewLRU(num_cache_entries, func(key uint64, val cacheEntry) {
 			if val.dirty {
 				// TODO: on PutChunk failure, consider re-inserting the entry into
 				// a retry queue so dirty data isn't lost on transient errors.
