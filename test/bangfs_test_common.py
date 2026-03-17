@@ -157,7 +157,7 @@ class BangFSSetup:
             "-daemon",
         ]
         if self.trace_log:
-            mount_args.extend(["-trace", "-tracelog", self.trace_log])
+            mount_args.extend(["-tracedebug", "-tracelog", self.trace_log])
 
         result = go_run("mount-fuse-bangfs", mount_args)
         if result.returncode != 0:

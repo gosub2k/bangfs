@@ -9,9 +9,20 @@ import (
 	"time"
 )
 
+// TraceLevel controls the verbosity of trace output.
+type TraceLevel int
+
+const (
+	// LevelNormal shows Error, Errno, and Done messages.
+	LevelNormal TraceLevel = iota
+	// LevelDebug additionally shows Debug/Debugf messages.
+	LevelDebug
+)
+
 // Tracer provides tracing for filesystem operations
 type Tracer struct {
 	enabled bool
+	level   TraceLevel
 	logger  *log.Logger
 	file    *os.File
 	mu      sync.Mutex
@@ -56,12 +67,19 @@ func (t *Tracer) CloseOutput() {
 	}
 }
 
-// Enable turns on tracing
+// Enable turns on tracing at LevelNormal.
 func (t *Tracer) Enable() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.enabled = true
 	t.logger.Println("Tracing enabled")
+}
+
+// SetLevel sets the trace verbosity level.
+func (t *Tracer) SetLevel(level TraceLevel) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.level = level
 }
 
 // Disable turns off tracing
@@ -129,18 +147,18 @@ func (o *TraceOp) Errorf(format string, args ...interface{}) {
 	o.Error(fmt.Errorf(format, args...))
 }
 
-// Debug marks a debug message
+// Debug marks a debug message. Only emitted at LevelDebug.
 func (o *TraceOp) Debug(info string) {
-	if o.tracer == nil {
+	if o.tracer == nil || o.tracer.level < LevelDebug {
 		return
 	}
 	elapsed := time.Since(o.start)
 	o.tracer.logger.Printf("%s(inum=%d, name=%q) DEBUG: %v [%v]", o.op, o.inum, o.name, info, elapsed)
 }
 
-// Debugf marks a debug message with printf-style formatting
+// Debugf marks a debug message with printf-style formatting. Only emitted at LevelDebug.
 func (o *TraceOp) Debugf(format string, args ...interface{}) {
-	if o.tracer == nil {
+	if o.tracer == nil || o.tracer.level < LevelDebug {
 		return
 	}
 	o.Debug(fmt.Sprintf(format, args...))

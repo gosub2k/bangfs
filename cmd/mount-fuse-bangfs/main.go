@@ -40,11 +40,12 @@ func main() {
 	httpPort := flag.Uint("http-port", httpPortDefault, "Riak HTTP port for stats/df (env: RIAK_HTTP_PORT)")
 	dataPath := flag.String("data-path", envOrDefault("BANGFS_DATA_PATH", "/data"), "Preferred disk mount path for df (env: BANGFS_DATA_PATH)")
 	trace := flag.Bool("trace", false, "Enable tracing output for debugging")
+	tracedebug := flag.Bool("tracedebug", false, "Enable debug-level tracing (implies -trace)")
 	tracelog := flag.String("tracelog", "", "Write trace output to file instead of stderr")
 
 	flag.Parse()
 
-	if *trace {
+	if *trace || *tracedebug {
 		tracer := bangutil.GetTracer()
 		if *tracelog != "" {
 			if err := tracer.SetOutputFile(*tracelog); err != nil {
@@ -53,6 +54,9 @@ func main() {
 			defer tracer.CloseOutput()
 		}
 		tracer.Enable()
+		if *tracedebug {
+			tracer.SetLevel(bangutil.LevelDebug)
+		}
 	}
 
 	// Validate required args
