@@ -476,13 +476,30 @@ func (kv *RiakKVStore) chunkFromBackend(key uint64) ([]byte, error) {
 	return fvc.Response.Values[0].Value, nil
 }
 
-// PutChunk stores a chunk by its key
+// PutChunk stores a chunk. With cache enabled, writes into cache as dirty;
+// the periodic flusher and eviction callback persist to Riak later.
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
+	if kv.useCache {
+		kv.cache.add(key, data, true)
+		return nil
+	}
 	return kv.putChunkToBackend(key, data)
 }
 
-// Chunk retrieves a chunk by its key
+// Chunk retrieves a chunk. With cache enabled, serves from cache on hit;
+// on miss reads from Riak and populates the cache as clean (read-through).
 func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
+	if kv.useCache {
+		if entry, ok := kv.cache.get(key); ok {
+			return entry.data, nil
+		}
+		data, err := kv.chunkFromBackend(key)
+		if err != nil {
+			return nil, err
+		}
+		kv.cache.add(key, data, false)
+		return data, nil
+	}
 	return kv.chunkFromBackend(key)
 }
 
