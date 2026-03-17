@@ -97,4 +97,5 @@ func (bs *BangServer) Mount(mountpoint string) error {
 func (bs *BangServer) Close() error {
 	return bs.kv.Close()
 }
+
 // test

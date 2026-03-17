@@ -1410,6 +1410,8 @@ Examples:
                         help=f"Second mountpoint for multi-client tests (default: {MOUNT_B})")
     parser.add_argument("--phase", default=TEST_PHASE,
                         help="Run only phases matching this string (e.g. '4', 'Write', '4,5'). Env: BANGFS_TEST_PHASE")
+    parser.add_argument("--no-cache", action="store_true", default=False,
+                        help="Ask client to turn off cache")
 
     args = parser.parse_args()
 
@@ -1424,17 +1426,20 @@ Examples:
         do_teardown = not args.no_teardown
 
     setup = TracedBangFSSetup(args.host, args.port, args.namespace, mount,
-                              dummy=args.dummy, trace_log=TRACE_LOG)
+                              dummy=args.dummy, trace_log=TRACE_LOG,
+                              nocache=args.no_cache)
     setup_b = BangFSSetup(args.host, args.port, args.namespace, args.mount_b,
-                           dummy=args.dummy)
+                           dummy=args.dummy, nocache=args.no_cache)
 
     # Register signal handler for cleanup
     def signal_handler(sig, frame):
-        print(f"\n{YELLOW}Interrupted, cleaning up...{RESET}")
-        if setup_b.is_mounted():
-            setup_b.unmount()
-            setup_b.cleanup_mountpoint()
-        setup.teardown()
+        print(f"\n{YELLOW}Interrupted{RESET}")
+        if do_teardown:
+            print(f"{YELLOW}Cleaning up...{RESET}")
+            if setup_b.is_mounted():
+                setup_b.unmount()
+                setup_b.cleanup_mountpoint()
+            setup.teardown()
         sys.exit(1)
 
     signal.signal(signal.SIGINT, signal_handler)

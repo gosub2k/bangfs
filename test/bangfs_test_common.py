@@ -69,13 +69,15 @@ class BangFSSetup:
     """Handles setup and teardown of a BangFS mount."""
 
     def __init__(self, host: str, port: str, namespace: str, mountpoint: str,
-                 dummy: bool = False, trace_log: Optional[str] = None):
+                 dummy: bool = False, trace_log: Optional[str] = None,
+                 nocache: bool = False):
         self.host = host
         self.port = port
         self.namespace = namespace
         self.mountpoint = mountpoint
         self.dummy = dummy
         self.trace_log = trace_log
+        self.nocache = nocache
 
     def backend_args(self) -> list[str]:
         """Return backend flags: either -dummy or -host/-port."""
@@ -158,6 +160,8 @@ class BangFSSetup:
         ]
         if self.trace_log:
             mount_args.extend(["-tracedebug", "-tracelog", self.trace_log])
+        if self.nocache:
+            mount_args.append("-nocache")
 
         result = go_run("mount-fuse-bangfs", mount_args)
         if result.returncode != 0:
