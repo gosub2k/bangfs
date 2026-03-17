@@ -22,16 +22,11 @@ import (
 
 const metadataBucket = "metadata"
 const chunkBucket = "chunks"
-
 const statsHTTPTimeout = 5 * time.Second
-
 const cacheScanMS = 100 * time.Millisecond
 
-// TODO: consider separate TTL strategy for dirty vs clean entries. Dirty entries
-// should be flushed promptly (sub-second background loop) but not evicted by TTL.
-// Read-cached (clean) entries should have a longer TTL to benefit read workloads.
-const cacheEntryTimeout = 500 * time.Millisecond
-
+// REVISIT: consider separate TTL strategy for dirty vs clean entries.
+const cacheEntryTimeout = 5 * time.Second
 const cacheSizeMB = 500 * 1024 * 1024 // 500 MB
 
 // RiakKVStoreOptions holds configuration for creating a RiakKVStore.
@@ -54,7 +49,7 @@ type RiakKVStore struct {
 	httpPort           uint16 // Riak HTTP API port for stats (default 8098)
 	dataPath           string // preferred disk mount point for df (default "/data")
 	useCache           bool
-	wbcache            localRWCache
+	cache              localRWCache
 }
 
 type cacheEntry struct {
@@ -97,10 +92,10 @@ func (kv *RiakKVStore) flush(keys []uint64) error {
 	if !kv.useCache {
 		return nil
 	}
-	kv.wbcache.flushlock.Lock()
-	defer kv.wbcache.flushlock.Unlock()
+	kv.cache.flushlock.Lock()
+	defer kv.cache.flushlock.Unlock()
 	for _, k := range keys {
-		entry, ok := kv.wbcache.cache.Get(k)
+		entry, ok := kv.cache.cache.Get(k)
 		if ok && entry.dirty {
 			if err := kv.PutChunk(k, entry.data); err != nil {
 				return err
@@ -131,15 +126,15 @@ func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
 		useCache:           opts.UseCache,
 	}
 	if opts.UseCache {
-		kv.wbcache.evictErr = make(chan error, 16)
+		kv.cache.evictErr = make(chan error, 16)
 		num_cache_entries := int(cacheSizeMB / GetChunkSize())
-		kv.wbcache.cache = expirable.NewLRU(num_cache_entries, func(key uint64, val cacheEntry) {
+		kv.cache.cache = expirable.NewLRU(num_cache_entries, func(key uint64, val cacheEntry) {
 			if val.dirty {
-				// TODO: on PutChunk failure, consider re-inserting the entry into
+				// REVISIT: on PutChunk failure, consider re-inserting the entry into
 				// a retry queue so dirty data isn't lost on transient errors.
 				if err := kv.PutChunk(key, val.data); err != nil {
 					select {
-					case kv.wbcache.evictErr <- err:
+					case kv.cache.evictErr <- err:
 					default:
 					}
 				}
@@ -354,6 +349,10 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 
 // PutChunk stores a chunk by its key
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
+
+	// update cache
+	// ... only
+
 	obj := &riak.Object{
 		Bucket:      chunkBucket,
 		BucketType:  kv.chunkBucketType,
@@ -379,6 +378,10 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 
 // Chunk retrieves a chunk by its key
 func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
+
+	// check in cache
+	// write back / through into vache
+
 	cmd, err := riak.NewFetchValueCommandBuilder().
 		WithBucketType(kv.chunkBucketType).
 		WithBucket(chunkBucket).
@@ -402,6 +405,8 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 
 // DeleteChunk deletes a chunk by its key
 func (kv *RiakKVStore) DeleteChunk(key uint64) error {
+	// remove from cache
+	//
 	cmd, err := riak.NewDeleteValueCommandBuilder().
 		WithBucketType(kv.chunkBucketType).
 		WithBucket(chunkBucket).
