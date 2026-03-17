@@ -18,6 +18,7 @@ Configuration (via environment or defaults):
     BANGFS_TEST_TRACE=0    # Show traces for all tests (default: only on failure)
     BANGFS_TEST_NOSKIP=0   # Don't skip remaining tests in a phase after failure
     BANGFS_TEST_PHASE=     # Run only phases matching this (e.g. "4", "Write", "4,5")
+    BANGFS_MOUNTDIR_B=$TMPDIR/bangfs_b  # Second mountpoint for multi-client tests
 
 Expected: lots of RED initially, progressively turning GREEN as you implement.
 """
@@ -46,6 +47,18 @@ TRACE_LOG = os.path.join(tempfile.gettempdir(), "bangfs-trace.log")
 TEST_TRACE = os.environ.get("BANGFS_TEST_TRACE", "0") not in ("0", "", "false", "no")
 TEST_NOSKIP = os.environ.get("BANGFS_TEST_NOSKIP", "0") not in ("0", "", "false", "no")
 TEST_PHASE = os.environ.get("BANGFS_TEST_PHASE", "")
+MOUNT_B = os.environ.get("BANGFS_MOUNTDIR_B", os.path.join(TMPDIR, "bangfs_b"))
+CONSISTENCY_TIMEOUT = 15  # seconds to wait for eventual consistency in multi-client tests
+
+
+def _poll_until(condition):
+    """Shell command that polls until condition is true, or times out."""
+    return f"timeout {CONSISTENCY_TIMEOUT} bash -c 'while ! ({condition}); do sleep 0.5; done'"
+
+
+def _poll_while(condition):
+    """Shell command that polls while condition is true (waits for it to become false)."""
+    return f"timeout {CONSISTENCY_TIMEOUT} bash -c 'while {condition}; do sleep 0.5; done'"
 
 
 class Expected(Enum):
@@ -968,6 +981,149 @@ TESTS = [
                Expected.SUCCESS),
     ]),
 
+    # -------------------------------------------------------------------------
+    # PHASE 15: Multi-Client Consistency
+    # Mounts a second FUSE client on the same namespace and tests that
+    # writes from one client are visible on the other (eventual consistency).
+    # -------------------------------------------------------------------------
+    ("PHASE 15: Multi-Client Consistency", [
+
+          # --- File Visibility (A writes, B reads) ---
+          Test("write file on client A",
+               "echo -n 'hello from A' > '{mount}/crossfile.txt'",
+               Expected.SUCCESS),
+
+          Test("file appears on client B",
+               _poll_until('test -f "{mount_b}/crossfile.txt"'),
+               Expected.SUCCESS),
+
+          Test("content matches on client B",
+               _poll_until('[ "$(cat "{mount_b}/crossfile.txt" 2>/dev/null)" = "hello from A" ]'),
+               Expected.SUCCESS),
+
+          Test("cleanup crossfile",
+               "rm -f '{mount}/crossfile.txt'",
+               Expected.SUCCESS),
+
+          # --- Directory Visibility (A creates, B sees) ---
+          Test("mkdir on client A",
+               "mkdir '{mount}/crossdir'",
+               Expected.SUCCESS),
+
+          Test("directory appears on client B",
+               _poll_until('test -d "{mount_b}/crossdir"'),
+               Expected.SUCCESS),
+
+          Test("cleanup crossdir",
+               "rmdir '{mount}/crossdir'",
+               Expected.SUCCESS),
+
+          # --- Reverse Direction (B writes, A reads) ---
+          Test("write file on client B",
+               "echo -n 'hello from B' > '{mount_b}/reverse.txt'",
+               Expected.SUCCESS),
+
+          Test("content visible on client A",
+               _poll_until('[ "$(cat "{mount}/reverse.txt" 2>/dev/null)" = "hello from B" ]'),
+               Expected.SUCCESS),
+
+          Test("cleanup reverse",
+               "rm -f '{mount_b}/reverse.txt'",
+               Expected.SUCCESS),
+
+          # --- Large File Visibility (multi-chunk) ---
+          Test("write 30KB file on client A",
+               "dd if=/dev/zero bs=1 count=30720 2>/dev/null | tr '\\0' 'X' > '{mount}/bigfile.bin'",
+               Expected.SUCCESS),
+
+          Test("30KB file has correct size on client B",
+               _poll_until('[ "$(stat -c %s "{mount_b}/bigfile.bin" 2>/dev/null)" = "30720" ]'),
+               Expected.SUCCESS),
+
+          Test("content hash matches across clients",
+               "test \"$(md5sum '{mount}/bigfile.bin' | cut -d' ' -f1)\" = \"$(md5sum '{mount_b}/bigfile.bin' | cut -d' ' -f1)\"",
+               Expected.SUCCESS),
+
+          Test("cleanup bigfile",
+               "rm -f '{mount}/bigfile.bin'",
+               Expected.SUCCESS),
+
+          # --- Delete Visibility (A deletes, B sees removal) ---
+          Test("setup: create file for delete test",
+               "echo -n 'soon gone' > '{mount}/todelete.txt'",
+               Expected.SUCCESS),
+
+          Test("file visible on B before delete",
+               _poll_until('test -f "{mount_b}/todelete.txt"'),
+               Expected.SUCCESS),
+
+          Test("delete file on client A",
+               "rm '{mount}/todelete.txt'",
+               Expected.SUCCESS),
+
+          Test("file disappears on client B",
+               _poll_while('test -f "{mount_b}/todelete.txt"'),
+               Expected.SUCCESS),
+
+          # --- Concurrent Writes (different files) ---
+          Test("client A writes from_a.txt",
+               "echo -n 'data-A' > '{mount}/from_a.txt'",
+               Expected.SUCCESS),
+
+          Test("client B writes from_b.txt",
+               "echo -n 'data-B' > '{mount_b}/from_b.txt'",
+               Expected.SUCCESS),
+
+          Test("client A sees from_b.txt",
+               _poll_until('[ "$(cat "{mount}/from_b.txt" 2>/dev/null)" = "data-B" ]'),
+               Expected.SUCCESS),
+
+          Test("client B sees from_a.txt",
+               _poll_until('[ "$(cat "{mount_b}/from_a.txt" 2>/dev/null)" = "data-A" ]'),
+               Expected.SUCCESS),
+
+          Test("cleanup concurrent files",
+               "rm -f '{mount}/from_a.txt' '{mount}/from_b.txt'",
+               Expected.SUCCESS),
+
+          # --- Concurrent Writes (same directory) ---
+          Test("create shared directory",
+               "mkdir '{mount}/shared'",
+               Expected.SUCCESS),
+
+          Test("shared dir visible on B",
+               _poll_until('test -d "{mount_b}/shared"'),
+               Expected.SUCCESS),
+
+          Test("client A writes shared/a.txt",
+               "echo -n 'A-content' > '{mount}/shared/a.txt'",
+               Expected.SUCCESS),
+
+          Test("client B writes shared/b.txt",
+               "echo -n 'B-content' > '{mount_b}/shared/b.txt'",
+               Expected.SUCCESS),
+
+          Test("client B sees shared/a.txt",
+               _poll_until('[ "$(cat "{mount_b}/shared/a.txt" 2>/dev/null)" = "A-content" ]'),
+               Expected.SUCCESS),
+
+          Test("client A sees shared/b.txt",
+               _poll_until('[ "$(cat "{mount}/shared/b.txt" 2>/dev/null)" = "B-content" ]'),
+               Expected.SUCCESS),
+
+          Test("both files visible on A",
+               _poll_until('test -f "{mount}/shared/a.txt" && test -f "{mount}/shared/b.txt"'),
+               Expected.SUCCESS),
+
+          Test("both files visible on B",
+               _poll_until('test -f "{mount_b}/shared/a.txt" && test -f "{mount_b}/shared/b.txt"'),
+               Expected.SUCCESS),
+
+          Test("cleanup shared directory",
+               "rm -rf '{mount}/shared'",
+               Expected.SUCCESS),
+    ]),
+
 ]
 
 
@@ -1032,14 +1188,15 @@ class TraceReader:
 trace_reader: Optional[TraceReader] = None
 
 
-def run_test(test: Test, mount: str) -> bool:
+def run_test(test: Test, mount: str, mount_b: str = "") -> bool:
     """Run a single test, return True if passed"""
-    # Substitute {mount} in command
-    cmd = test.command.format(mount=mount, tmpdir=TMPDIR)
+    # Substitute {mount}, {mount_b} in command
+    fmt = dict(mount=mount, mount_b=mount_b, tmpdir=TMPDIR)
+    cmd = test.command.format(**fmt)
 
     # Run setup if present
     if test.setup:
-        run_command(test.setup.format(mount=mount, tmpdir=TMPDIR))
+        run_command(test.setup.format(**fmt))
 
     # Run the test command
     success, stdout, stderr = run_command(cmd, timeout=60) # Some tests include a pause of 30s
@@ -1069,13 +1226,13 @@ def run_test(test: Test, mount: str) -> bool:
             details = f"expected '{test.expected_value}', got: '{stdout}'"
 
     elif test.expected == Expected.FILE_EXISTS:
-        path = test.check_path.format(mount=mount, tmpdir=TMPDIR) if test.check_path else None
+        path = test.check_path.format(**fmt) if test.check_path else None
         passed = path and os.path.exists(path)
         if not passed:
             details = f"file {path} does not exist"
 
     elif test.expected == Expected.FILE_GONE:
-        path = test.check_path.format(mount=mount, tmpdir=TMPDIR) if test.check_path else None
+        path = test.check_path.format(**fmt) if test.check_path else None
         passed = path and not os.path.exists(path)
         if not passed:
             details = f"file {path} still exists"
@@ -1103,7 +1260,7 @@ def run_test(test: Test, mount: str) -> bool:
 
     # Run cleanup if present
     if test.cleanup:
-        run_command(test.cleanup.format(mount=mount, tmpdir=TMPDIR))
+        run_command(test.cleanup.format(**fmt))
 
     return passed
 
@@ -1169,8 +1326,13 @@ def _phase_matches(phase_name: str, phase_filter: str) -> bool:
             return True
     return False
 
-def run_tests(mount: str, phase_filter: str = "", integration=False) -> tuple[int, int, int]:
-    """Run all tests, return (passed, failed, skipped) counts"""
+def run_tests(mount: str, mount_b: str = "", phase_filter: str = "",
+              integration=False, setup_b=None) -> tuple[int, int, int]:
+    """Run all tests, return (passed, failed, skipped) counts.
+
+    If setup_b is provided, the second client will be mounted/unmounted
+    automatically around the multi-client phase.
+    """
     passed = 0
     failed = 0
     skipped = 0
@@ -1178,6 +1340,23 @@ def run_tests(mount: str, phase_filter: str = "", integration=False) -> tuple[in
     for phase_name, tests in TESTS[:]:
         if not _phase_matches(phase_name, phase_filter):
             continue
+
+        # Mount second client just before multi-client phase
+        mounted_b = False
+        if "Multi-Client" in phase_name and setup_b:
+            if setup_b.is_mounted():
+                log_info("Second client already mounted.")
+            else:
+                try:
+                    log_info("Mounting second client for multi-client tests...")
+                    setup_b.mount_filesystem()
+                    mounted_b = True
+                except Exception as e:
+                    print(f"\n{BLUE}{BOLD}--- {phase_name} ---{RESET}")
+                    print(f"  {RED}FAIL{RESET} mount second client: {e}")
+                    failed += len(tests)
+                    continue
+
         print(f"\n{BLUE}{BOLD}--- {phase_name} ---{RESET}")
         phase_failed = False
         for test in tests:
@@ -1189,13 +1368,18 @@ def run_tests(mount: str, phase_filter: str = "", integration=False) -> tuple[in
             elif test.integration_only and not integration:
                 print(f"  {BLUE}SKIP{RESET} {test.description}")
                 continue
-            if run_test(test, mount):
+            if run_test(test, mount, mount_b=mount_b):
                 passed += 1
             elif test.informational:
                 pass  # don't count, don't skip following tests
             else:
                 failed += 1
                 phase_failed = True
+
+        # Unmount second client after multi-client phase
+        if mounted_b:
+            setup_b.unmount()
+            setup_b.cleanup_mountpoint()
 
     return passed, failed, skipped
 
@@ -1227,6 +1411,8 @@ Examples:
     parser.add_argument("--mount", default=os.environ.get("BANGFS_MOUNTDIR", DEFAULT_MOUNTPOINT),
                         help=f"Mountpoint path (default: {DEFAULT_MOUNTPOINT})")
     parser.add_argument("--dummy", action="store_true", help="Use file-backed store under /tmp instead of Riak")
+    parser.add_argument("--mount-b", default=os.environ.get("BANGFS_MOUNTDIR_B", MOUNT_B),
+                        help=f"Second mountpoint for multi-client tests (default: {MOUNT_B})")
     parser.add_argument("--phase", default=TEST_PHASE,
                         help="Run only phases matching this string (e.g. '4', 'Write', '4,5'). Env: BANGFS_TEST_PHASE")
 
@@ -1244,10 +1430,15 @@ Examples:
 
     setup = TracedBangFSSetup(args.host, args.port, args.namespace, mount,
                               dummy=args.dummy, trace_log=TRACE_LOG)
+    setup_b = BangFSSetup(args.host, args.port, args.namespace, args.mount_b,
+                           dummy=args.dummy)
 
     # Register signal handler for cleanup
     def signal_handler(sig, frame):
         print(f"\n{YELLOW}Interrupted, cleaning up...{RESET}")
+        if setup_b.is_mounted():
+            setup_b.unmount()
+            setup_b.cleanup_mountpoint()
         setup.teardown()
         sys.exit(1)
 
@@ -1281,8 +1472,11 @@ Examples:
             print(f"\n{RED}Preflight failed — aborting.{RESET}")
             sys.exit(1)
 
-        # Run tests
-        passed, failed, skipped = run_tests(mount, phase_filter=args.phase, integration=(not args.dummy))
+        # Run tests (setup_b is passed so multi-client phase can mount/unmount it)
+        passed, failed, skipped = run_tests(mount, mount_b=args.mount_b,
+                                            phase_filter=args.phase,
+                                            integration=(not args.dummy),
+                                            setup_b=setup_b)
 
         # Summary
         total = passed + failed + skipped
@@ -1302,7 +1496,10 @@ Examples:
         exit_kode = 1
 
     finally:
-        # Teardown
+        # Teardown (unmount second client if still mounted)
+        if setup_b.is_mounted():
+            setup_b.unmount()
+            setup_b.cleanup_mountpoint()
         if do_teardown:
             setup.teardown()
 
