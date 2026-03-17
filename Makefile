@@ -37,6 +37,7 @@ test: unit-test dummy-test
 # Go unit tests
 unit-test: build
 	go test -v ./bangfuse/
+	go test -v ./bangutil/
 
 # Full test suite against file-backed store (includes multi-client)
 dummy-test: build

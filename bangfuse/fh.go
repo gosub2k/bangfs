@@ -323,11 +323,3 @@ func (f *BangFH) Read(ctx context.Context, dest []byte, off_in int64) (fuse.Read
 	op.Done()
 	return fuse.ReadResultData(out_buf), 0
 }
-// test
-// test
-// test comment
-// test
-// test
-// test
-// test
-// test
