@@ -112,6 +112,7 @@ func (c *Cache) setMap(e *CacheEntry) {
 // --- public API ---
 
 // Get retrieves an entry and moves it to tail (most recently used).
+// Returns a copy of the data to prevent aliasing.
 func (c *Cache) Get(key uint64) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -121,7 +122,9 @@ func (c *Cache) Get(key uint64) ([]byte, bool) {
 	}
 	c.moveToTail(e)
 	e.touchedAt = time.Now().UnixNano()
-	return e.Data, true
+	out := make([]byte, len(e.Data))
+	copy(out, e.Data)
+	return out, true
 }
 
 // Peek retrieves an entry without touching LRU order.
@@ -145,9 +148,12 @@ func (c *Cache) Add(key uint64, data []byte, dirty bool) {
 
 	now := time.Now().UnixNano()
 
+	buf := make([]byte, len(data))
+	copy(buf, data)
+
 	if e, ok := c.lookup(key); ok {
 		c.removeFromMaps(e)
-		e.Data = data
+		e.Data = buf
 		e.dirty = dirty
 		e.touchedAt = now
 		c.setMap(e)
@@ -157,7 +163,7 @@ func (c *Cache) Add(key uint64, data []byte, dirty bool) {
 
 	e := &CacheEntry{
 		Key:       key,
-		Data:      data,
+		Data:      buf,
 		dirty:     dirty,
 		touchedAt: now,
 	}
