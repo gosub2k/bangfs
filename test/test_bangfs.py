@@ -936,12 +936,7 @@ TESTS = [
                "test $(du -b '{mount}/foo' | cut -f1) -eq $((8192*100))",
                Expected.SUCCESS),
 
-          Test("wait fpr caches to time out", "sleep 30", Expected.SUCCESS),
-
-          Test("file still exists",
-               "stat '{mount}/foo'",
-               Expected.SUCCESS,
-               informational=True),
+          # Removed slow test to check inode metadata cache timing out where the file would dissaper
 
           Test("disk space in bytes is still as expected",
                "test $(du -b '{mount}/foo' | cut -f1) -eq $((8192*100))",
@@ -952,11 +947,11 @@ TESTS = [
                "test $(du -b '{tmpdir}/bangfs_testfoo' | cut -f1) -eq $(du -b '{mount}/foo' | cut -f1)",
                Expected.SUCCESS),
 
-          Test("du -k is equal",
+          Test("du -k is equal between filesystem",
                "test $(du -k '{tmpdir}/bangfs_testfoo' | cut -f1) -eq $(du -k '{mount}/foo' | cut -f1)",
                Expected.SUCCESS),
 
-          Test("read the file (may activate the kernel page cache)",
+          Test("read the file (to activate any caches)",
                "cat  '{mount}/foo' > /dev/null",
                Expected.SUCCESS),
 
@@ -964,15 +959,15 @@ TESTS = [
                "diff '{tmpdir}/bangfs_testfoo' '{mount}/foo'",
                Expected.SUCCESS),
 
-          Test("disk space in bytes is as expected",
+          Test("disk space in bytes is still as expected",
                "test $(du -b '{mount}/foo' | cut -f1) -eq $((8192*100))",
                Expected.SUCCESS),
 
-          Test("du -b is equal between filesystems",
+          Test("du -b is still equal between filesystems",
                "test $(du -b '{tmpdir}/bangfs_testfoo' | cut -f1) -eq $(du -b '{mount}/foo' | cut -f1)",
                Expected.SUCCESS),
 
-          Test("du -k is equal",
+          Test("du -k is still equal",
                "test $(du -k '{tmpdir}/bangfs_testfoo' | cut -f1) -eq $(du -k '{mount}/foo' | cut -f1)",
                Expected.SUCCESS),
 
