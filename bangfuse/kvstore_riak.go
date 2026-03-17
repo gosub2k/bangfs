@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -15,17 +14,13 @@ import (
 
 	bangpb "bangfs/proto"
 
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
-
 	"bangfs/bangutil"
 )
 
 const metadataBucket = "metadata"
 const chunkBucket = "chunks"
 const statsHTTPTimeout = 5 * time.Second
-const cacheScanMS = 100 * time.Millisecond
 
-// REVISIT: consider separate TTL strategy for dirty vs clean entries.
 const cacheEntryTimeout = 5 * time.Second
 const cacheSizeMB = 500 * 1024 * 1024 // 500 MB
 
@@ -49,132 +44,24 @@ type RiakKVStore struct {
 	httpPort           uint16 // Riak HTTP API port for stats (default 8098)
 	dataPath           string // preferred disk mount point for df (default "/data")
 	useCache           bool
-	cache              localRWCache
-}
-
-type cacheEntry struct {
-	data  []byte
-	dirty bool
-}
-
-type localRWCache struct {
-	flushlock sync.RWMutex
-	cache     *expirable.LRU[uint64, cacheEntry]
-	evictErr  chan error
-	stopFlush chan struct{}
-}
-
-func (c *localRWCache) add(key uint64, data []byte, dirty bool) {
-	if c.cache == nil {
-		return
-	}
-	c.flushlock.Lock()
-	defer c.flushlock.Unlock()
-	c.cache.Add(key, cacheEntry{data: data, dirty: dirty})
-}
-
-func (c *localRWCache) get(key uint64) (cacheEntry, bool) {
-	if c.cache == nil {
-		return cacheEntry{}, false
-	}
-	c.flushlock.Lock()
-	defer c.flushlock.Unlock()
-	return c.cache.Get(key)
-}
-
-func (c *localRWCache) peek(key uint64) (cacheEntry, bool) {
-	if c.cache == nil {
-		return cacheEntry{}, false
-	}
-	return c.cache.Peek(key)
-}
-
-// dirtyKeys returns all keys in the cache that are marked dirty.
-// Caller must hold flushlock.
-func (c *localRWCache) dirtyKeys() []uint64 {
-	if c.cache == nil {
-		return nil
-	}
-	var dirty []uint64
-	for _, k := range c.cache.Keys() {
-		if entry, ok := c.cache.Peek(k); ok && entry.dirty {
-			dirty = append(dirty, k)
-		}
-	}
-	return dirty
-}
-
-// flush writes dirty cache entries for the given keys to the backend.
-func (kv *RiakKVStore) flush(keys []uint64) error {
-	if !kv.useCache {
-		return nil
-	}
-	kv.cache.flushlock.Lock()
-	defer kv.cache.flushlock.Unlock()
-	for _, k := range keys {
-		entry, ok := kv.cache.cache.Peek(k)
-		if ok && entry.dirty {
-			if err := kv.putChunkToBackend(k, entry.data); err != nil {
-				return err
-			}
-			// mark clean after successful write
-			kv.cache.cache.Add(k, cacheEntry{data: entry.data, dirty: false})
-		}
-	}
-	return nil
-}
-
-// flushAllDirty writes all dirty cache entries to the backend.
-func (kv *RiakKVStore) flushAllDirty() error {
-	if !kv.useCache {
-		return nil
-	}
-	kv.cache.flushlock.Lock()
-	dirty := kv.cache.dirtyKeys()
-	kv.cache.flushlock.Unlock()
-	return kv.flush(dirty)
-}
-
-// startPeriodicFlush launches a goroutine that periodically flushes all dirty
-// cache entries to the backend. Stop it by closing kv.cache.stopFlush.
-func (kv *RiakKVStore) startPeriodicFlush(interval time.Duration) {
-	kv.cache.stopFlush = make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := kv.flushAllDirty(); err != nil {
-					select {
-					case kv.cache.evictErr <- err:
-					default:
-					}
-				}
-			case <-kv.cache.stopFlush:
-				return
-			}
-		}
-	}()
+	cache              *Cache
 }
 
 // FlushChunks writes dirty cached chunks for the given keys to the backend.
 func (kv *RiakKVStore) FlushChunks(keys []uint64) error {
-	return kv.flush(keys)
+	if kv.cache == nil {
+		return nil
+	}
+	return kv.cache.Flush(keys)
 }
 
 // DrainEvictErrors returns the first error from async cache eviction writes,
 // or nil if the error queue is empty.
 func (kv *RiakKVStore) DrainEvictErrors() error {
-	if !kv.useCache {
+	if kv.cache == nil {
 		return nil
 	}
-	select {
-	case err := <-kv.cache.evictErr:
-		return err
-	default:
-		return nil
-	}
+	return kv.cache.DrainErrors()
 }
 
 // NewRiakKVStore creates a new KVStore instance.
@@ -197,23 +84,9 @@ func NewRiakKVStore(opts RiakKVStoreOptions) (*RiakKVStore, error) {
 		useCache:           opts.UseCache,
 	}
 	if opts.UseCache {
-		kv.cache.evictErr = make(chan error, 16)
-		num_cache_entries := int(cacheSizeMB / GetChunkSize())
-		kv.cache.cache = expirable.NewLRU(num_cache_entries, func(key uint64, val cacheEntry) {
-			if val.dirty {
-				// REVISIT: on failure, consider re-inserting the entry into
-				// a retry queue so dirty data isn't lost on transient errors.
-				if err := kv.putChunkToBackend(key, val.data); err != nil {
-					select {
-					case kv.cache.evictErr <- err:
-					default:
-					}
-				}
-			}
-		}, cacheEntryTimeout)
-	}
-	if opts.UseCache {
-		kv.startPeriodicFlush(cacheEntryTimeout / 2)
+		numEntries := int(cacheSizeMB / GetChunkSize())
+		kv.cache = NewCache(numEntries, cacheEntryTimeout, kv.putChunkToBackend)
+		kv.cache.Start(cacheEntryTimeout / 2)
 	}
 	if err := kv.Connect(); err != nil {
 		return kv, err // for latter printing of the values
@@ -290,12 +163,9 @@ func (kv *RiakKVStore) InitBackend() error {
 
 // Close closes the connection to the backend
 func (kv *RiakKVStore) Close() error {
-	if kv.cache.stopFlush != nil {
-		close(kv.cache.stopFlush)
-	}
-	// flush remaining dirty entries before shutting down
-	if kv.useCache {
-		_ = kv.flushAllDirty()
+	if kv.cache != nil {
+		kv.cache.Stop()
+		_ = kv.cache.FlushAll()
 	}
 	if kv.cluster != nil {
 		return kv.cluster.Stop()
@@ -479,8 +349,8 @@ func (kv *RiakKVStore) chunkFromBackend(key uint64) ([]byte, error) {
 // PutChunk stores a chunk. With cache enabled, writes into cache as dirty;
 // the periodic flusher and eviction callback persist to Riak later.
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
-	if kv.useCache {
-		kv.cache.add(key, data, true)
+	if kv.cache != nil {
+		kv.cache.Add(key, data, true)
 		return nil
 	}
 	return kv.putChunkToBackend(key, data)
@@ -489,15 +359,15 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 // Chunk retrieves a chunk. With cache enabled, serves from cache on hit;
 // on miss reads from Riak and populates the cache as clean (read-through).
 func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
-	if kv.useCache {
-		if entry, ok := kv.cache.get(key); ok {
-			return entry.data, nil
+	if kv.cache != nil {
+		if data, ok := kv.cache.Get(key); ok {
+			return data, nil
 		}
 		data, err := kv.chunkFromBackend(key)
 		if err != nil {
 			return nil, err
 		}
-		kv.cache.add(key, data, false)
+		kv.cache.Add(key, data, false)
 		return data, nil
 	}
 	return kv.chunkFromBackend(key)
@@ -505,8 +375,9 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 
 // DeleteChunk deletes a chunk by its key
 func (kv *RiakKVStore) DeleteChunk(key uint64) error {
-	// remove from cache
-	//
+	if kv.cache != nil {
+		kv.cache.Delete(key)
+	}
 	cmd, err := riak.NewDeleteValueCommandBuilder().
 		WithBucketType(kv.chunkBucketType).
 		WithBucket(chunkBucket).
