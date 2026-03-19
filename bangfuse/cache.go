@@ -217,33 +217,58 @@ func (c *Cache) Delete(key uint64) {
 	c.count--
 }
 
-// Flush writes the specified dirty keys to the backend and marks them clean.
+// Flush writes the specified dirty keys to the backend. Snapshots data and
+// marks entries clean under the lock, then writes without holding it.
+// Concurrent writes to the same key go into the fresh dirty map and get
+// picked up next flush cycle.
 func (c *Cache) Flush(keys []uint64) error {
+	type snapshot struct {
+		key   uint64
+		data  []byte
+		entry *CacheEntry
+	}
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	snaps := make([]snapshot, 0, len(keys))
 	for _, key := range keys {
 		e, ok := c.dirty[key]
 		if !ok {
 			continue
 		}
-		if err := c.writeFn(e.Key, e.Data); err != nil {
+		buf := make([]byte, len(e.Data))
+		copy(buf, e.Data)
+		snaps = append(snaps, snapshot{key: key, data: buf, entry: e})
+		// Move to clean now; concurrent Add re-dirties into the new dirty map
+		e.dirty = false
+		delete(c.dirty, key)
+		c.clean[key] = e
+	}
+	c.mu.Unlock()
+
+	for _, s := range snaps {
+		if err := c.writeFn(s.key, s.data); err != nil {
+			// Re-dirty if no concurrent write has already re-dirtied it
+			c.mu.Lock()
+			if !s.entry.dirty {
+				s.entry.dirty = true
+				delete(c.clean, s.key)
+				c.dirty[s.key] = s.entry
+			}
+			c.mu.Unlock()
 			return err
 		}
-		delete(c.dirty, key)
-		e.dirty = false
-		c.clean[key] = e
 	}
 	return nil
 }
 
 // FlushAll writes all dirty entries to the backend.
 func (c *Cache) FlushAll() error {
-	c.mu.Lock()
+	c.mu.RLock()
 	keys := make([]uint64, 0, len(c.dirty))
 	for k := range c.dirty {
 		keys = append(keys, k)
 	}
-	c.mu.Unlock()
+	c.mu.RUnlock()
 	return c.Flush(keys)
 }
 
