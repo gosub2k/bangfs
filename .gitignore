@@ -19,3 +19,8 @@ bangfs-*
 bangfs_testbang
 scripts/
 .githooks/**
+
+# More misc
+foo.py
+bar.py
+baz.py
