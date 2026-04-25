@@ -231,6 +231,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 				op.Error(fmt.Errorf("getting metadata for found inode"))
 				return nil, syscall.EIO
 			}
+			MetadataToFuseAttr(found_inum, found_meta, &out.Attr)
 			// REVISIT: check why return a NewInode and set the mode and ops, maybe the number is sufficient.
 			if IsDir(found_meta) {
 				return d.NewInode(ctx, &BangDirNode{}, fs.StableAttr{Mode: fuse.S_IFDIR, Ino: found_inum}), 0

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"syscall"
 
-	//"time"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -58,12 +58,12 @@ func (bs *BangServer) Mount(mountpoint string) error {
 	gChunkidgen = NewIdGenerator()
 
 	root := &BangDirNode{}
-	// entry_timeout := time.Second * 30
-	// attr_timeout := time.Second * 30
+	entry_timeout := 500 * time.Millisecond
+	attr_timeout := 500 * time.Millisecond
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
-
-		// EntryTimeout: &entry_timeout,
-		// AttrTimeout:  &attr_timeout,
+		EntryTimeout: &entry_timeout,
+		AttrTimeout:  &attr_timeout,
+		NegativeTimeout: &entry_timeout,
 		MountOptions: fuse.MountOptions{
 			FsName:      "bangfs",
 			Name:        "bangfs",

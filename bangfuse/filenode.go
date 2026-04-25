@@ -210,7 +210,8 @@ func (bf *BangFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, 
 
 	fh := &BangFH{Inum: inum, Metadata: meta, VClock: vclock, Flags: flags}
 	var fuse_flags uint32
-	fuse_flags |= fuse.FOPEN_KEEP_CACHE
+	// Don't set FOPEN_KEEP_CACHE: the kernel must invalidate page cache on
+	// every open so that other clients' writes become visible.
 
 	op.Done()
 	return fh, fuse_flags, 0

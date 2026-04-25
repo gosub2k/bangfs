@@ -102,11 +102,7 @@ func (f *BangFH) modifyChunk(ctx context.Context, w_chkidx int, w_chkoffset uint
 		return fmt.Errorf("modifyChunk: %d+%d > chunksize %d", data_len, w_chkoffset, GetChunkSize())
 	}
 
-	// REVISIT
 	meta_chunk_len := f.Metadata.Chunks[w_chkidx].Size
-	if w_chkoffset > meta_chunk_len {
-		return fmt.Errorf("modifyChunk: offset %d past chunk end %d", w_chkoffset, meta_chunk_len)
-	}
 
 	chk_key := f.Metadata.Chunks[w_chkidx].Hash
 	chk_data, err := gKVStore.Chunk(chk_key)
