@@ -122,7 +122,7 @@ func (kv *FileKVStore) bumpVclock(key uint64) ([]byte, error) {
 // Metadata CRUD
 
 func (kv *FileKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byte, error) {
-	// Fail if key already exists (matches Riak IfNoneMatch behavior)
+	// Fail if key already exists
 	if _, err := os.Stat(kv.metaPath(key)); err == nil {
 		return nil, fmt.Errorf("key already exists: %d", key)
 	}
@@ -163,7 +163,7 @@ func (kv *FileKVStore) Metadata(key uint64) (*bangpb.InodeMeta, []byte, error) {
 }
 
 func (kv *FileKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vclockIn []byte) ([]byte, error) {
-	// Check vclock matches (simulates Riak IfNotModified)
+	// Check vclock matches for optimistic concurrency control
 	current, err := kv.readVclock(key)
 	if err != nil {
 		return nil, fmt.Errorf("key not found: %d", key)

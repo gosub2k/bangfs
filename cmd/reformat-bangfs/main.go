@@ -21,20 +21,32 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func envPortOrDefault(key string, fallback uint) uint {
+func envUintOrDefault(key string, fallback uint) uint {
 	if v := os.Getenv(key); v != "" {
-		if p, err := strconv.ParseUint(v, 10, 16); err == nil {
-			return uint(p)
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			return uint(n)
 		}
 	}
 	return fallback
 }
 
 func main() {
-	host := flag.String("host", envOrDefault("RIAK_HOST", ""), "Riak host (env: RIAK_HOST)")
-	port := flag.Uint("port", envPortOrDefault("RIAK_PORT", 8087), "Riak port (env: RIAK_PORT)")
+	// Postgres flags
+	pgHost := flag.String("pg-host", envOrDefault("POSTGRES_HOST", ""), "Postgres host (env: POSTGRES_HOST)")
+	pgPort := flag.Uint("pg-port", envUintOrDefault("POSTGRES_PORT", 5432), "Postgres port (env: POSTGRES_PORT)")
+	pgUser := flag.String("pg-user", envOrDefault("POSTGRES_USER", "bangfs"), "Postgres user (env: POSTGRES_USER)")
+	pgPassword := flag.String("pg-password", envOrDefault("POSTGRES_PASSWORD", ""), "Postgres password (env: POSTGRES_PASSWORD)")
+	pgDB := flag.String("pg-db", envOrDefault("POSTGRES_DB", "bangfs"), "Postgres database (env: POSTGRES_DB)")
+
+	// Cassandra flags
+	cassHostsStr := flag.String("cass-hosts", envOrDefault("CASSANDRA_HOSTS", ""), "Cassandra hosts, comma-separated (env: CASSANDRA_HOSTS)")
+	cassPort := flag.Uint("cass-port", envUintOrDefault("CASSANDRA_PORT", 9042), "Cassandra port (env: CASSANDRA_PORT)")
+	cassUser := flag.String("cass-user", envOrDefault("CASSANDRA_USER", ""), "Cassandra user (env: CASSANDRA_USER)")
+	cassPassword := flag.String("cass-password", envOrDefault("CASSANDRA_PASSWORD", ""), "Cassandra password (env: CASSANDRA_PASSWORD)")
+
+	// Common flags
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
-	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of Riak")
+	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of real backends")
 	force := flag.Bool("force", false, "Skip confirmation prompt")
 
 	flag.Parse()
@@ -45,17 +57,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Confirm destruction unless -force
 	if !*force {
 		fmt.Printf("WARNING: This will permanently delete all data in namespace '%s'!\n", *namespace)
-		fmt.Printf("  Metadata bucket: %s_bangfs_metadata\n", *namespace)
-		fmt.Printf("  Chunk bucket:    %s_bangfs_chunks\n", *namespace)
+		fmt.Printf("  Metadata table: %s_bangfs_metadata (Postgres)\n", *namespace)
+		fmt.Printf("  Chunk table:    bangfs.%s_chunks (Cassandra)\n", *namespace)
 		fmt.Print("\nType the namespace name to confirm: ")
 
 		reader := bufio.NewReader(os.Stdin)
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
-
 		if input != *namespace {
 			log.Fatal("Confirmation failed. Aborting.")
 		}
@@ -70,29 +80,35 @@ func main() {
 		}
 		kv = fkv
 	} else {
-		if *host == "" {
-			log.Println("Error: -host is required (or set RIAK_HOST), or use -dummy")
+		if *pgHost == "" || *cassHostsStr == "" {
+			log.Println("Error: -pg-host and -cass-hosts are required (or set POSTGRES_HOST, CASSANDRA_HOSTS), or use -dummy")
 			flag.Usage()
 			os.Exit(1)
 		}
-		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(bangfuse.RiakKVStoreOptions{
-			Host:      *host,
-			Port:      uint16(*port),
-			Namespace: *namespace,
+		cassHosts := strings.Split(*cassHostsStr, ",")
+		log.Printf("Connecting to Postgres at %s:%d and Cassandra at %s", *pgHost, *pgPort, *cassHostsStr)
+		pkv, err := bangfuse.NewPGCassKVStore(bangfuse.PGCassKVStoreOptions{
+			PGHost:       *pgHost,
+			PGPort:       uint16(*pgPort),
+			PGUser:       *pgUser,
+			PGPassword:   *pgPassword,
+			PGDatabase:   *pgDB,
+			CassHosts:    cassHosts,
+			CassPort:     int(*cassPort),
+			CassUser:     *cassUser,
+			CassPassword: *cassPassword,
+			Namespace:    *namespace,
 		})
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}
-		kv = rkv
+		kv = pkv
 	}
 	defer kv.Close()
 
-	// Wipe filesystem data
 	log.Printf("Wiping filesystem with namespace '%s'...", *namespace)
 	if err := kv.WipeBackend(os.Stderr); err != nil {
 		log.Fatalf("Failed to wipe filesystem: %v", err)
 	}
-
-	log.Printf("Filesystem wiped successfuly")
+	log.Printf("Filesystem wiped successfully")
 }

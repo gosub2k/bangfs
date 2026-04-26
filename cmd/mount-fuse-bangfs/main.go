@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"bangfs/bangfuse"
@@ -21,25 +22,36 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func main() {
-	host := flag.String("host", envOrDefault("RIAK_HOST", ""), "Riak host (env: RIAK_HOST)")
-	portDefault := uint(8087)
-	if v, err := strconv.ParseUint(envOrDefault("RIAK_PORT", "8087"), 10, 16); err == nil {
-		portDefault = uint(v)
+func envUintOrDefault(key string, fallback uint) uint {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			return uint(n)
+		}
 	}
-	port := flag.Uint("port", portDefault, "Riak port (env: RIAK_PORT)")
+	return fallback
+}
+
+func main() {
+	// Postgres flags
+	pgHost := flag.String("pg-host", envOrDefault("POSTGRES_HOST", ""), "Postgres host (env: POSTGRES_HOST)")
+	pgPort := flag.Uint("pg-port", envUintOrDefault("POSTGRES_PORT", 5432), "Postgres port (env: POSTGRES_PORT)")
+	pgUser := flag.String("pg-user", envOrDefault("POSTGRES_USER", "bangfs"), "Postgres user (env: POSTGRES_USER)")
+	pgPassword := flag.String("pg-password", envOrDefault("POSTGRES_PASSWORD", ""), "Postgres password (env: POSTGRES_PASSWORD)")
+	pgDB := flag.String("pg-db", envOrDefault("POSTGRES_DB", "bangfs"), "Postgres database (env: POSTGRES_DB)")
+
+	// Cassandra flags
+	cassHostsStr := flag.String("cass-hosts", envOrDefault("CASSANDRA_HOSTS", ""), "Cassandra hosts, comma-separated (env: CASSANDRA_HOSTS)")
+	cassPort := flag.Uint("cass-port", envUintOrDefault("CASSANDRA_PORT", 9042), "Cassandra port (env: CASSANDRA_PORT)")
+	cassUser := flag.String("cass-user", envOrDefault("CASSANDRA_USER", ""), "Cassandra user (env: CASSANDRA_USER)")
+	cassPassword := flag.String("cass-password", envOrDefault("CASSANDRA_PASSWORD", ""), "Cassandra password (env: CASSANDRA_PASSWORD)")
+
+	// Common flags
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
 	mountpoint := flag.String("mount", envOrDefault("BANGFS_MOUNTDIR", ""), "Mount point (env: BANGFS_MOUNTDIR)")
-	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of Riak")
+	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of real backends")
+	nocache := flag.Bool("nocache", false, "Disable write-back chunk cache")
 	daemon := flag.Bool("daemon", false, "Run in background (daemon mode)")
 	daemonChild := flag.Bool("daemon-child", false, "Internal flag for daemon mode")
-	httpPortDefault := uint(8098)
-	if v, err := strconv.ParseUint(envOrDefault("RIAK_HTTP_PORT", "8098"), 10, 16); err == nil {
-		httpPortDefault = uint(v)
-	}
-	httpPort := flag.Uint("http-port", httpPortDefault, "Riak HTTP port for stats/df (env: RIAK_HTTP_PORT)")
-	dataPath := flag.String("data-path", envOrDefault("BANGFS_DATA_PATH", "/data"), "Preferred disk mount path for df (env: BANGFS_DATA_PATH)")
-	nocache := flag.Bool("nocache", false, "Disable write-back cache (Riak only)")
 	trace := flag.Bool("trace", false, "Enable tracing output for debugging")
 	tracedebug := flag.Bool("tracedebug", false, "Enable debug-level tracing (implies -trace)")
 	tracelog := flag.String("tracelog", "", "Write trace output to file instead of stderr")
@@ -60,14 +72,12 @@ func main() {
 		}
 	}
 
-	// Validate required args
 	if *namespace == "" || *mountpoint == "" {
 		log.Println("Error: -namespace and -mount are required (or set BANGFS_NAMESPACE, BANGFS_MOUNTDIR)")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	// If daemon mode requested and not already the child, re-exec in background
 	if *daemon && !*daemonChild {
 		args := append(os.Args[1:], "-daemon-child")
 		cmd := exec.Command(os.Args[0], args...)
@@ -91,25 +101,32 @@ func main() {
 		}
 		kv = fkv
 	} else {
-		if *host == "" {
-			log.Println("Error: -host is required (or set RIAK_HOST), or use -dummy")
+		if *pgHost == "" || *cassHostsStr == "" {
+			log.Println("Error: -pg-host and -cass-hosts are required (or set POSTGRES_HOST, CASSANDRA_HOSTS), or use -dummy")
 			flag.Usage()
 			os.Exit(1)
 		}
-		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(bangfuse.RiakKVStoreOptions{
-			Host:      *host,
-			Port:      uint16(*port),
-			Namespace: *namespace,
-			HTTPPort:  uint16(*httpPort),
-			DataPath:  *dataPath,
-			UseCache:  !*nocache,
+		cassHosts := strings.Split(*cassHostsStr, ",")
+		log.Printf("Connecting to Postgres at %s:%d and Cassandra at %s", *pgHost, *pgPort, *cassHostsStr)
+		pkv, err := bangfuse.NewPGCassKVStore(bangfuse.PGCassKVStoreOptions{
+			PGHost:       *pgHost,
+			PGPort:       uint16(*pgPort),
+			PGUser:       *pgUser,
+			PGPassword:   *pgPassword,
+			PGDatabase:   *pgDB,
+			CassHosts:    cassHosts,
+			CassPort:     int(*cassPort),
+			CassUser:     *cassUser,
+			CassPassword: *cassPassword,
+			Namespace:    *namespace,
+			UseCache:     !*nocache,
 		})
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}
-		kv = rkv
+		kv = pkv
 	}
+
 	bs, err := bangfuse.NewBangServer(kv)
 	if err != nil {
 		log.Fatalf("Failed to initialize: %v", err)
@@ -121,7 +138,6 @@ func main() {
 		log.Fatalf("Mount failed: %v", err)
 	}
 
-	// Handle Ctrl-C and SIGTERM for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -133,7 +149,6 @@ func main() {
 		}
 	}()
 
-	// Wait for unmount (either from signal or external umount command)
 	bs.Wait()
 	log.Println("Unmounted successfully")
 }

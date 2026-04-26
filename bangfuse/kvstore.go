@@ -11,6 +11,13 @@ type DiskUsageInfo struct {
 	UsedChunks  uint64
 }
 
+// ChunkFlusher is an optional interface implemented by stores that have a
+// write-back cache. fh.go uses it to flush dirty chunks on file close.
+type ChunkFlusher interface {
+	FlushChunks(keys []uint64) error
+	DrainEvictErrors() error
+}
+
 type KVStore interface {
 	Connect() error
 	InitBackend() error

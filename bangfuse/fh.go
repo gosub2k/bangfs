@@ -217,14 +217,14 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, 
 // Flush is called on every close(2) of a file descriptor. It flushes dirty
 // cached chunks belonging to this file and surfaces any async eviction errors.
 func (f *BangFH) Flush(ctx context.Context) syscall.Errno {
-	rkv, ok := gKVStore.(*RiakKVStore)
-	if !ok || !rkv.useCache {
+	flusher, ok := gKVStore.(ChunkFlusher)
+	if !ok {
 		return 0
 	}
 
 	op := bangutil.GetTracer().Op("Flush", f.Inum, f.Metadata.Name)
 
-	if err := rkv.DrainEvictErrors(); err != nil {
+	if err := flusher.DrainEvictErrors(); err != nil {
 		op.Error(fmt.Errorf("eviction write error: %w", err))
 		return syscall.EIO
 	}
@@ -236,7 +236,7 @@ func (f *BangFH) Flush(ctx context.Context) syscall.Errno {
 
 	if len(keys) > 0 {
 		op.Debugf("flushing %d chunks", len(keys))
-		if err := rkv.FlushChunks(keys); err != nil {
+		if err := flusher.FlushChunks(keys); err != nil {
 			op.Error(fmt.Errorf("flush chunks: %w", err))
 			return syscall.EIO
 		}

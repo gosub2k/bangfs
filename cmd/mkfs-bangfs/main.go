@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"bangfs/bangfuse"
 )
@@ -17,20 +18,33 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func envPortOrDefault(key string, fallback uint) uint {
+func envUintOrDefault(key string, fallback uint) uint {
 	if v := os.Getenv(key); v != "" {
-		if p, err := strconv.ParseUint(v, 10, 16); err == nil {
-			return uint(p)
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			return uint(n)
 		}
 	}
 	return fallback
 }
 
 func main() {
-	host := flag.String("host", envOrDefault("RIAK_HOST", ""), "Riak host (env: RIAK_HOST)")
-	port := flag.Uint("port", envPortOrDefault("RIAK_PORT", 8087), "Riak port (env: RIAK_PORT)")
+	// Postgres flags
+	pgHost := flag.String("pg-host", envOrDefault("POSTGRES_HOST", ""), "Postgres host (env: POSTGRES_HOST)")
+	pgPort := flag.Uint("pg-port", envUintOrDefault("POSTGRES_PORT", 5432), "Postgres port (env: POSTGRES_PORT)")
+	pgUser := flag.String("pg-user", envOrDefault("POSTGRES_USER", "bangfs"), "Postgres user (env: POSTGRES_USER)")
+	pgPassword := flag.String("pg-password", envOrDefault("POSTGRES_PASSWORD", ""), "Postgres password (env: POSTGRES_PASSWORD)")
+	pgDB := flag.String("pg-db", envOrDefault("POSTGRES_DB", "bangfs"), "Postgres database (env: POSTGRES_DB)")
+
+	// Cassandra flags
+	cassHostsStr := flag.String("cass-hosts", envOrDefault("CASSANDRA_HOSTS", ""), "Cassandra hosts, comma-separated (env: CASSANDRA_HOSTS)")
+	cassPort := flag.Uint("cass-port", envUintOrDefault("CASSANDRA_PORT", 9042), "Cassandra port (env: CASSANDRA_PORT)")
+	cassUser := flag.String("cass-user", envOrDefault("CASSANDRA_USER", ""), "Cassandra user (env: CASSANDRA_USER)")
+	cassPassword := flag.String("cass-password", envOrDefault("CASSANDRA_PASSWORD", ""), "Cassandra password (env: CASSANDRA_PASSWORD)")
+	cassRF := flag.Uint("cass-rf", envUintOrDefault("CASSANDRA_RF", 1), "Cassandra replication factor (env: CASSANDRA_RF)")
+
+	// Common flags
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
-	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of Riak")
+	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of real backends")
 	chunkSize := flag.Uint("chunk-size", 1024*1024, "Chunk size in bytes (default 1MB)")
 
 	flag.Parse()
@@ -52,34 +66,41 @@ func main() {
 		}
 		kv = fkv
 	} else {
-		if *host == "" {
-			log.Println("Error: -host is required (or set RIAK_HOST), or use -dummy")
+		if *pgHost == "" || *cassHostsStr == "" {
+			log.Println("Error: -pg-host and -cass-hosts are required (or set POSTGRES_HOST, CASSANDRA_HOSTS), or use -dummy")
 			flag.Usage()
 			os.Exit(1)
 		}
-		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(bangfuse.RiakKVStoreOptions{
-			Host:      *host,
-			Port:      uint16(*port),
-			Namespace: *namespace,
-			UseCache:  false,
+		cassHosts := strings.Split(*cassHostsStr, ",")
+		log.Printf("Connecting to Postgres at %s:%d and Cassandra at %s", *pgHost, *pgPort, *cassHostsStr)
+		pkv, err := bangfuse.NewPGCassKVStore(bangfuse.PGCassKVStoreOptions{
+			PGHost:       *pgHost,
+			PGPort:       uint16(*pgPort),
+			PGUser:       *pgUser,
+			PGPassword:   *pgPassword,
+			PGDatabase:   *pgDB,
+			CassHosts:    cassHosts,
+			CassPort:     int(*cassPort),
+			CassUser:     *cassUser,
+			CassPassword: *cassPassword,
+			CassRF:       int(*cassRF),
+			Namespace:    *namespace,
+			UseCache:     false,
 		})
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}
-		kv = rkv
+		kv = pkv
 	}
 	defer kv.Close()
 
-	// Initialize filesystem
 	log.Printf("Initializing filesystem with namespace '%s'", *namespace)
 	if err := kv.InitBackend(); err != nil {
 		log.Fatalf("Failed to initialize filesystem: %v", err)
 	}
 
 	log.Printf("Filesystem initialized successfully!")
-	log.Printf("  Metadata bucket: %s_bangfs_metadata", *namespace)
-	log.Printf("  Chunk bucket:    %s_bangfs_chunks", *namespace)
-	log.Printf("  Chunk size:      %d bytes", *chunkSize)
-	log.Printf("\nMount with: mount-fuse-bangfs -host %s -port %d -namespace %s -mount /your/mountpoint", *host, *port, *namespace)
+	log.Printf("  Metadata table: %s_bangfs_metadata (Postgres)", *namespace)
+	log.Printf("  Chunk table:    bangfs.%s_chunks (Cassandra)", *namespace)
+	log.Printf("  Chunk size:     %d bytes", *chunkSize)
 }
