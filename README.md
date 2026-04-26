@@ -1,4 +1,4 @@
-# BangFS
+ BangFS
 
 FUSE distributed filesystem with minimal components:
 
@@ -8,15 +8,29 @@ FUSE distributed filesystem with minimal components:
 - (Planned) - file system checker and garbage collector
 
 _This is an experimental project and a work in progress_: see [Shortcomings](#shortcomings) for what's missing, and run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of what works.
- 
- The idea came from wanting to implement distributed systems concepts hands-on (consistency models, CAS concurrency, chunked storage) and from noticing that Riak is still actively used and could serve both roles. Design decisions are discovered as much as planned. For example, the need for a robust unique ID generator only became obvious after hitting collisions. 
+
+The idea came from wanting to implement distributed systems concepts hands-on: consistency models, CAS concurrency, chunked storage, and the tradeoffs between metadata correctness and data throughput. Design decisions are discovered as much as planned.
+
+## Learnings
+
+- unique id generation is not obvious until you hit collisions
+- "eventually consistent" and "fast" are not the same thing, eventual consistency is about convergence not latency
+- NATS jepsen 2025: strong consistency claims dont mean much without an actual jepsen test
+- Cassandra QUORUM is not linearizable, two coordinators can both get quorum acks for conflicting writes and LWW picks a winner silently
+- for immutable content-addressed chunks, consistency model basically doesnt matter. write once = no conflicts possible
+- splitting metadata and chunk stores lets you pick the right tradeoff per access pattern instead of compromising both
+- riak strongly consistent buckets were marked experimental in 2.2.3 docs. should have been a red flag
+- fuse makes kernel <-> userspace boundary very visible. every syscall you take for granted becomes a method you have to implement
+- vclock comparison is deceptively simple until you have siblings and need merge logic
+- postgres optimistic locking with version column is simpler than it looks and good enough for filesystem metadata concurrency
+- k8s operators that need node labels/hugepages/cpu-pinning are a sign the software wasnt designed for cloud-native from the start
 
 ## Use case / tradeoffs
 
-This concept should work for a single writer at a time per file, tolerating some undefined behavior for multiple clients writing - unlike distributed filesystems such as GFS.
-But this makes it convenient to use simple CAS (read, modify, write if not updated in the meantime) for metadata write consistency. This eliminates the need any coordination services at the cost of failing some writes, and possibly orphaning some file chunks.
+This concept should work for a single writer at a time per file, tolerating some undefined behavior for multiple clients writing — unlike distributed filesystems such as GFS.
+But this makes it convenient to use simple CAS (read, modify, write if not updated in the meantime) for metadata write consistency. This eliminates the need for any coordination services at the cost of failing some writes, and possibly orphaning some file chunks.
 
-File data writes are expected to be on the hot path - tradeoff of consistency for speed writing (eg, storing many chunks faster without the consensus overhead of strong consistency).
+File data writes are expected to be on the hot path — tradeoff of consistency for speed writing (eg, storing many chunks faster without the consensus overhead of strong consistency).
 
 Overall this filesystem (conceptually at least) is a good fit for something like a CDN where multiple clients can read but only one client writes a given file.
 
@@ -30,38 +44,40 @@ Overall this filesystem (conceptually at least) is a good fit for something like
        │ FUSE   (userspace ↔ kernel ↔ userspace)
        │
   ┌────┴─────┐
-  │  BangFS  │  mount-fs-bangfs, mkfs-bangfs
+  │  BangFS  │  mount-fuse-bangfs, mkfs-bangfs
   └────┬─────┘
        │ KVStore interface
-       ├──────────────────────┐
-  ┌────┴──────┐         ┌─────┴──────┐
-  │  Metadata │         │  Chunks    │   key value store
-  └───────────┘         └────────────┘
+       ├──────────────────────────┐
+  ┌────┴──────────┐         ┌─────┴──────────┐
+  │  Metadata     │         │  Chunks        │
+  │  (Postgres)   │         │  (Cassandra)   │
+  └───────────────┘         └────────────────┘
 ```
 
 Data in the key value store is of two kinds:
 
-**Metadata** inode-like data, stored in a **strongly consistent** bucket. Reads to metadata must always see previous writes. Metadata is keyed by 64 bit inode number. The metadata values are single protobuf messages. Metadata representing file inodes contains a list of chunk keys for each fixed-size chunk of data in the file. Concurrent access to metadata via vector clocks (vclock). Metadata updates use CAS with optimistic concurrency control (ie read the data, modify it, and try to write).
+**Metadata** — inode-like data, stored with **strong consistency** in Postgres. Reads to metadata must always see previous writes. Metadata is keyed by 64-bit inode number and stored as protobuf. File inodes contain an ordered list of chunk keys. Concurrent access is controlled via a version counter: updates use optimistic concurrency control (read, modify, write only if version matches).
 
-**File chunks** Files are broken up into as same-size chunks (except for the last chunk in a file, which may be shorter).  Chunks will be stored in an **eventually consistent** bucket: a read immediately after a write may not reflect the latest data. There is no guarantee that writes to the same chunk key will be propagated to replicas in the same order
+**File chunks** — files are broken into fixed-size chunks (except the last, which may be shorter). Chunks are stored in Cassandra at `CL=ONE`: a read immediately after a write may not reflect the latest data. There is no ordering guarantee for writes to the same chunk key across replicas.
 
-The backend is abstracted behind a Go interface (`KVStore`) with separate operations for metadata and chunks.
-The current _implementation_ of this interface 0uses [Riak](https://github.com/basho/riak) for the KV store, but this interface could be implemented for any key value store such as DynamoDB or Scylla.
+The backend is abstracted behind a Go interface (`KVStore`) with separate operations for metadata and chunks. The current implementation uses **Postgres** (via `pgx/v5`) for metadata and **Cassandra** (via `gocql`) for chunks. The interface could be implemented for any key-value store.
 
-Concurrency is handled by using **write-once chunk keys**: each client's `IdGenerator` embeds its own identity, two clients will never produce the same key. Every chunk write (whether appending or replacing an existing chunk) generates a fresh, globally unique key. The metadata is updated to point to the new key. This gives an invariant: for any version of the metadata (containing the ordered list of chunk keys), every referenced chunk is immutable and will eventually be readable with the data that one client intended to write.
+Concurrency is handled by using **write-once chunk keys**: each client's `IdGenerator` embeds its own identity, so two clients never produce the same key. Every chunk write (whether appending or replacing) generates a fresh, globally unique key. Metadata is then updated to point to the new key. This gives an invariant: for any version of the metadata, every referenced chunk is immutable and will eventually be readable.
 
-Inode numbers and chunk keys are generated by a simple **Unique Sequence number** that embeds the client's ID in the sequence number.
+Inode numbers and chunk keys are generated by a simple **Unique Sequence number** that embeds the client's ID.
 
 ## Status
 
 - `mkfs-bangfs && mount-fuse-bangfs` create and mount the filesystem, visible at `$BANGFS_MOUNTDIR`
-- `make test` builds and passes 
-- `make integration-test` builds and passes against a single Riak instance and a Riak cluster
+- `make test` builds and passes
+- `make integration-test` builds and passes against Postgres + Cassandra
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+
 - FUSE3 (`libfuse3-dev` on Debian/Ubuntu)
+- Postgres 14+ (metadata)
+- Cassandra 4+ (chunks)
 - For integration testing: Docker
 
 ## Building
@@ -74,89 +90,34 @@ Produces three binaries: `mkfs-bangfs`, `mount-fuse-bangfs`, `reformat-bangfs`.
 
 ## Testing
 
-`make test` runs the test script agains a dummy filesystem, using files on the local filesystem as the backend key value store. It is useful for testing the internal logic and fuse mounting options.
+`make test` runs the test script against a dummy filesystem, using files on the local filesystem as the backend. Useful for testing internal logic and FUSE mounting.
 
-`make integration-test` runs the test script against a Riak instance and expects to find the connection info in environment variables.
-
-It is also posible to run the test script standalone to invoke different test phases individually, for example:
-
-```
-  ~/projects/bangfs$ ./test/test_bangfs.py --phase 13
-BangFS Test Suite
-============================================================
-Backend:    Riak (127.0.0.1:30087)
-Namespace:  testbang
-Mountpoint: /tmp/bang
-Setup:      yes
-Teardown:   yes
-============================================================
-[INFO] Creating filesystem (namespace=testbang)...
-[INFO] Filesystem created
-[INFO] Creating mountpoint /tmp/bang...
-[INFO] Mounting filesystem in daemon mode...
-[INFO] Filesystem mounted at /tmp/bang
-
---- Preflight ---
-  PASS mounted as FUSE filesystem
-  PASS mounted as bangfs in /proc/mounts
-  PASS ls on mountpoint works
-
---- PHASE 13: Random Write in Large Files ---
-  PASS setup: create 30KB file of A's
-  PASS 30KB file has correct size
-  PASS first byte is A
-  PASS last byte is A
-  PASS write HELLO at offset 5000 (chunk 1 interior)
-  PASS read back HELLO at offset 5000
-  PASS size unchanged after chunk 1 write
-  PASS write CROSSBOUND at chunk 1/2 boundary (offset 10235)
-  PASS read back CROSSBOUND at offset 10235
-  PASS bytes before boundary write untouched
-  PASS bytes after boundary write untouched
-  PASS write CHUNK3 at offset 25000
-  PASS read back CHUNK3 at offset 25000
-  PASS HELLO still at offset 5000
-  PASS CROSSBOUND still at offset 10235
-  PASS size still 30720 after all writes
-  PASS read 20 bytes spanning chunk 1/2 boundary
-  PASS cleanup bigseek.bin
-
-============================================================
-RESULTS: 18 passed, 0 failed, 0 skipped / 18 total
-ALL TESTS PASSED!
-============================================================
-[INFO] Tearing down...
-[INFO] Unmounting /tmp/bang...
-[INFO] Wiping existing filesystem (namespace=testbang)...
-[INFO] l2026/03/06 18:56:00 Connecting to Riak at 127.0.0.1:30087
-[INFO] l2026/03/06 18:56:00 Wiping filesystem with namespace 'testbang'...
-[INFO] l  wiping metadata [testbang_bangfs_metadata/metadata]...
-[INFO] l  found 1 keys in testbang_bangfs_metadata/metadata
-[INFO] l  deleted 1 metadata keys
-[INFO] l  wiping chunks [testbang_bangfs_chunks/chunks]...
-[INFO] l  found 0 keys in testbang_bangfs_chunks/chunks
-[INFO] l  deleted 0 chunk keys
-[INFO] l2026/03/06 18:56:01 Filesystem wiped successfuly
-[INFO] Teardown complete
-````
+`make integration-test` runs the test script against live Postgres and Cassandra instances, reading connection info from environment variables.
 
 **Environment Variables**
 
-Set these before testing (accepted by scripts and binaries):
+Set these before running the binaries or integration tests:
 
-- `RIAK_HOST` — Riak protobuf host (default: `127.0.0.1`)
-- `RIAK_PORT` — Riak protobuf port (default: `8087`)
-- `RIAK_HTTP_PORT` — Riak HTTP API port (default: `8098`)
-- `BANGFS_NAMESPACE` — Filesystem / bucket-type namespace prefix (required)
-- `BANGFS_MOUNTDIR` — FUSE mount point directory (required)
-- `RIAK_IMAGE` — Docker image for Riak (default: `bangriak`)
-- `RIAK_CONTAINER` — Docker container name (default: `bangtest`)
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_HOST` | — | Postgres host (required) |
+| `POSTGRES_PORT` | `5432` | Postgres port |
+| `POSTGRES_USER` | `bangfs` | Postgres user |
+| `POSTGRES_PASSWORD` | — | Postgres password |
+| `POSTGRES_DB` | `bangfs` | Postgres database |
+| `CASSANDRA_HOSTS` | — | Cassandra contact points, comma-separated (required) |
+| `CASSANDRA_PORT` | `9042` | Cassandra port |
+| `CASSANDRA_USER` | — | Cassandra user (optional) |
+| `CASSANDRA_PASSWORD` | — | Cassandra password (optional) |
+| `CASSANDRA_RF` | `1` | Cassandra replication factor |
+| `BANGFS_NAMESPACE` | — | Filesystem namespace prefix (required) |
+| `BANGFS_MOUNTDIR` | — | FUSE mount point directory (required) |
 
-All three binaries also accept equivalent CLI flags (`-host`, `-port`, `-namespace`, `-mount`).
+All binaries also accept equivalent CLI flags (`-pg-host`, `-cass-hosts`, `-namespace`, `-mount`, etc).
 
 **Unit test**
 
-Uses a file-backed KV store (`/tmp/`).
+Uses a file-backed KV store under `/tmp/`. No external services needed.
 
 ```bash
 make test
@@ -164,45 +125,122 @@ make test
 
 **Integration test**
 
-Setup (one time):
-
-Start a Riak container and initialize bucket types:
+The quickest way is the top-level script, which starts both backends, waits for readiness, and runs the suite (containers are removed on exit):
 
 ```bash
-./start-riak-docker.sh
-./init-riak-buckets-docker.sh
+./integration-test.sh           # start, test, stop
+./integration-test.sh --no-stop # keep containers running after test
 ```
 
-Verify Riak is serving:
+Or manually:
 
 ```bash
-./test-riak-rest.sh
-```
+docker run -d --name bangfs-pg \
+  -e POSTGRES_USER=bangfs -e POSTGRES_PASSWORD=bangfs -e POSTGRES_DB=bangfs \
+  -p 5432:5432 postgres:16
 
-#### Running
+docker run -d --name bangfs-cass \
+  -p 9042:9042 cassandra:4
 
-```bash
+# wait for both to be ready, then:
+export POSTGRES_HOST=127.0.0.1 POSTGRES_USER=bangfs POSTGRES_PASSWORD=bangfs POSTGRES_DB=bangfs
+export CASSANDRA_HOSTS=127.0.0.1
+
 make integration-test
+```
+
+## Kubernetes deployment
+
+Both backends have Helm charts that work on generic nodes with no special labels, taints, or node configuration.
+
+### Postgres — CloudNativePG (CNPG)
+
+```bash
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm repo update
+
+# Install the operator (once per cluster)
+helm install cnpg cnpg/cloudnative-pg \
+  --namespace cnpg-system --create-namespace
+
+# Create a Postgres cluster for bangfs
+kubectl apply -f - <<EOF
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: bangfs-pg
+spec:
+  instances: 3
+  storage:
+    size: 10Gi
+  bootstrap:
+    initdb:
+      database: bangfs
+      owner: bangfs
+      secret:
+        name: bangfs-pg-credentials
+EOF
+
+# Create the credentials secret first
+kubectl create secret generic bangfs-pg-credentials \
+  --from-literal=username=bangfs \
+  --from-literal=password=<your-password>
+```
+
+CNPG handles automatic failover (Raft-based primary election), rolling upgrades, and WAL streaming replication. No manual `pg_ctl` or join/leave commands. The cluster service is at `bangfs-pg-rw.default.svc` (read-write) and `bangfs-pg-r.default.svc` (read replicas).
+
+```bash
+export POSTGRES_HOST=bangfs-pg-rw.default.svc
+export POSTGRES_USER=bangfs
+export POSTGRES_PASSWORD=<your-password>
+export POSTGRES_DB=bangfs
+```
+
+### Cassandra — Bitnami Helm chart
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+helm install bangfs-cass bitnami/cassandra \
+  --set replicaCount=3 \
+  --set dbUser.user=bangfs \
+  --set dbUser.password=<your-password>
+```
+
+Cassandra auto-rebalances when pods are added or removed. Scale up by changing `replicaCount`; the ring redistributes token ranges automatically.
+
+```bash
+export CASSANDRA_HOSTS=bangfs-cass.default.svc
+export CASSANDRA_USER=bangfs
+export CASSANDRA_PASSWORD=<your-password>
+export CASSANDRA_RF=3
+```
+
+### Initializing the filesystem
+
+Once both backends are running, initialize the namespace and mount:
+
+```bash
+mkfs-bangfs -namespace mynamespace
+
+mount-fuse-bangfs -namespace mynamespace -mount /mnt/bangfs
 ```
 
 ## Shortcomings
 
-This design is is viable in the happy path (see [tests](#testing)) for  single-writer, read-heavy workloads but is so far not viable for general-purpose multi-client filesystem use, which would very likely require adding more components to the initial design. Some shortcomings as of this README are:
+This design is viable in the happy path (see [tests](#testing)) for single-writer, read-heavy workloads but is not yet viable for general-purpose multi-client filesystem use. Some shortcomings as of this README:
+
 - **No crash recovery:** chunks are written before metadata. If the metadata update fails (vclock conflict, crash, network error), orphaned chunks are never cleaned up. There is no write-ahead log.
 - **No conflict resolution:** CAS on metadata detects concurrent writes but does not retry or merge — the write is dropped and the client gets EIO.
 - **Multi-step operations are not atomic:** rename updates 3 metadata keys sequentially. A failure mid-way can leave the filesystem in an inconsistent state (eg, file removed from source directory but not added to target).
-- **Read-after-write visibility:** a read immediately after a write may fail to find a chunk that metadata already references, due to eventual consistency propagation delay.
-
-The strongly consistent bucket type in Riak is listed as "experimental" in the Riak 2.2.3 documentation. 
+- **Read-after-write visibility:** a read immediately after a write may fail to find a chunk that metadata already references, due to Cassandra's eventual consistency propagation delay.
 
 Various functions of a filesystem are not currently/yet implemented (see [tests](#testing) for the SOT on this).
-
-Several tests would need to be added to really kick the tires on this.
 
 ## Future ideas
 
 - Benchmark read/write throughput and characterize performance bottlenecks.
-- Alternative KV backends (ScyllaDB, DynamoDB).
 - Retry logic for vclock conflicts in directory operations.
 - Directory indexing for O(1) child lookup.
 - Chunk garbage collection.

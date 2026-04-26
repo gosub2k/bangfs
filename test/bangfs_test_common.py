@@ -22,8 +22,10 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 
 # Configuration defaults
-DEFAULT_RIAK_HOST = "172.17.0.2"
-DEFAULT_RIAK_PORT = "8087"
+DEFAULT_PG_HOST = "127.0.0.1"
+DEFAULT_PG_PORT = "5432"
+DEFAULT_CASS_HOSTS = "127.0.0.1"
+DEFAULT_CASS_PORT = "9042"
 DEFAULT_NAMESPACE = "foobar"
 DEFAULT_MOUNTPOINT = os.path.join(tempfile.gettempdir(), "bangfs")
 TMPDIR = tempfile.gettempdir()
@@ -68,11 +70,14 @@ def log_error(msg: str):
 class BangFSSetup:
     """Handles setup and teardown of a BangFS mount."""
 
-    def __init__(self, host: str, port: str, namespace: str, mountpoint: str,
+    def __init__(self, pg_host: str, pg_port: str, cass_hosts: str, cass_port: str,
+                 namespace: str, mountpoint: str,
                  dummy: bool = False, trace_log: Optional[str] = None,
                  nocache: bool = False):
-        self.host = host
-        self.port = port
+        self.pg_host = pg_host
+        self.pg_port = pg_port
+        self.cass_hosts = cass_hosts
+        self.cass_port = cass_port
         self.namespace = namespace
         self.mountpoint = mountpoint
         self.dummy = dummy
@@ -80,10 +85,18 @@ class BangFSSetup:
         self.nocache = nocache
 
     def backend_args(self) -> list[str]:
-        """Return backend flags: either -dummy or -host/-port."""
+        """Return backend flags: either -dummy or pg/cass connection flags."""
         if self.dummy:
             return ["-dummy"]
-        return ["-host", self.host, "-port", self.port]
+        return [
+            "-pg-host", self.pg_host,
+            "-pg-port", self.pg_port,
+            "-pg-user", os.environ.get("POSTGRES_USER", "bangfs"),
+            "-pg-password", os.environ.get("POSTGRES_PASSWORD", ""),
+            "-pg-db", os.environ.get("POSTGRES_DB", "bangfs"),
+            "-cass-hosts", self.cass_hosts,
+            "-cass-port", self.cass_port,
+        ]
 
     def is_mounted(self) -> bool:
         """Check if mountpoint is currently mounted."""

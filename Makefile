@@ -43,7 +43,7 @@ unit-test: build
 dummy-test: build
 	cd test && python3 test_bangfs.py --dummy
 
-# Full test suite against Riak (includes multi-client)
-# Set RIAK_HOST, RIAK_PORT, BANGFS_NAMESPACE env vars or use defaults
+# Full test suite against live Postgres + Cassandra backends
+# Set POSTGRES_HOST, CASSANDRA_HOSTS (and optionally BANGFS_NAMESPACE) before running
 integration-test: build
 	cd test && python3 test_bangfs.py

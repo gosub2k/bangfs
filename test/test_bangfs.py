@@ -11,8 +11,8 @@ Usage:
     python3 test_bangfs.py /path/to/mount     # Use custom mountpoint (legacy mode)
 
 Configuration (via environment or defaults):
-    RIAK_HOST=172.17.0.2
-    RIAK_PORT=8087
+    POSTGRES_HOST=127.0.0.1
+    CASSANDRA_HOSTS=127.0.0.1
     BANGFS_NAMESPACE=foobar
     BANGFS_MOUNTDIR=$TMPDIR/bangfs
     BANGFS_TEST_TRACE=0    # Show traces for all tests (default: only on failure)
@@ -37,7 +37,8 @@ from enum import Enum
 
 from bangfs_test_common import (
     RED, GREEN, YELLOW, BLUE, RESET, BOLD, DIM,
-    DEFAULT_RIAK_HOST, DEFAULT_RIAK_PORT, DEFAULT_NAMESPACE, TMPDIR,
+    DEFAULT_PG_HOST, DEFAULT_PG_PORT, DEFAULT_CASS_HOSTS, DEFAULT_CASS_PORT,
+    DEFAULT_NAMESPACE, TMPDIR,
     run_command, go_run, log_info, log_warn, log_error,
     BangFSSetup,
 )
@@ -1397,15 +1398,19 @@ Examples:
                         help="Skip setup (wipe, mkfs, mount)")
     parser.add_argument("--no-teardown", action="store_true",
                         help="Skip teardown (keep filesystem mounted)")
-    parser.add_argument("--host", default=os.environ.get("RIAK_HOST", DEFAULT_RIAK_HOST),
-                        help=f"Riak host (default: {DEFAULT_RIAK_HOST})")
-    parser.add_argument("--port", default=os.environ.get("RIAK_PORT", DEFAULT_RIAK_PORT),
-                        help=f"Riak port (default: {DEFAULT_RIAK_PORT})")
+    parser.add_argument("--pg-host", default=os.environ.get("POSTGRES_HOST", DEFAULT_PG_HOST),
+                        help=f"Postgres host (env: POSTGRES_HOST, default: {DEFAULT_PG_HOST})")
+    parser.add_argument("--pg-port", default=os.environ.get("POSTGRES_PORT", DEFAULT_PG_PORT),
+                        help=f"Postgres port (env: POSTGRES_PORT, default: {DEFAULT_PG_PORT})")
+    parser.add_argument("--cass-hosts", default=os.environ.get("CASSANDRA_HOSTS", DEFAULT_CASS_HOSTS),
+                        help=f"Cassandra hosts, comma-separated (env: CASSANDRA_HOSTS, default: {DEFAULT_CASS_HOSTS})")
+    parser.add_argument("--cass-port", default=os.environ.get("CASSANDRA_PORT", DEFAULT_CASS_PORT),
+                        help=f"Cassandra port (env: CASSANDRA_PORT, default: {DEFAULT_CASS_PORT})")
     parser.add_argument("--namespace", default=os.environ.get("BANGFS_NAMESPACE", DEFAULT_NAMESPACE),
                         help=f"Filesystem namespace (default: {DEFAULT_NAMESPACE})")
     parser.add_argument("--mount", default=os.environ.get("BANGFS_MOUNTDIR", DEFAULT_MOUNTPOINT),
                         help=f"Mountpoint path (default: {DEFAULT_MOUNTPOINT})")
-    parser.add_argument("--dummy", action="store_true", help="Use file-backed store under /tmp instead of Riak")
+    parser.add_argument("--dummy", action="store_true", help="Use file-backed store under /tmp")
     parser.add_argument("--mount-b", default=os.environ.get("BANGFS_MOUNTDIR_B", MOUNT_B),
                         help=f"Second mountpoint for multi-client tests (default: {MOUNT_B})")
     parser.add_argument("--phase", default=TEST_PHASE,
@@ -1425,11 +1430,13 @@ Examples:
         do_setup = not args.no_setup
         do_teardown = not args.no_teardown
 
-    setup = TracedBangFSSetup(args.host, args.port, args.namespace, mount,
+    setup = TracedBangFSSetup(args.pg_host, args.pg_port, args.cass_hosts, args.cass_port,
+                              args.namespace, mount,
                               dummy=args.dummy, trace_log=TRACE_LOG,
                               nocache=args.no_cache)
-    setup_b = BangFSSetup(args.host, args.port, args.namespace, args.mount_b,
-                           dummy=args.dummy, nocache=args.no_cache)
+    setup_b = BangFSSetup(args.pg_host, args.pg_port, args.cass_hosts, args.cass_port,
+                          args.namespace, args.mount_b,
+                          dummy=args.dummy, nocache=args.no_cache)
 
     # Register signal handler for cleanup
     def signal_handler(sig, frame):
@@ -1450,7 +1457,7 @@ Examples:
     if args.dummy:
         print(f"Backend:    file ({TMPDIR}/bangfs_{args.namespace}/)")
     else:
-        print(f"Backend:    Riak ({args.host}:{args.port})")
+        print(f"Backend:    Postgres ({args.pg_host}:{args.pg_port}) + Cassandra ({args.cass_hosts}:{args.cass_port})")
     print(f"Namespace:  {args.namespace}")
     print(f"Mountpoint: {mount}")
     print(f"Setup:      {'yes' if do_setup else 'no'}")
