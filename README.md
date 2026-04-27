@@ -9,7 +9,9 @@
   - media storage
   - filesystem for inference servers
 - the backend systems should not require too much maintenance
-- *not* have super high durability guarantees, and favor caching for speed, for example - occasianally, data that is referenced in filesystem metadata might not have been written, or be readily available right away, etc.
+- *not* have super high durability guarantees, and favor caching for speed, for example: 
+  - occasionally, data that is referenced in filesystem metadata might not have been written, or be readily available right away, etc.
+  - but - faster IO is theoretically possible
 
 ## Startup
 
@@ -18,17 +20,17 @@ run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of wh
 if you have Kubernets environment available
 
 ```sh
-make
-. k8s_backends.sh  # If you have a Kubernetes environment available (recommended)
-./mkfs-bangfs
-./mount-fuse
-
+$ make
+$ . k8s_backends.sh  # If you have a Kubernetes environment available (recommended)
+$ ./mkfs-bangfs
+$ ./mount-fuse-bangfs -mount /data/mountdir
+```
 
 ## Learnings
 
-- Originally plan was to use only Riak This would have built a nicely 'symettric' filesystem without explicit need for coordinators, managers that are found in many distributed filesystems, etc, but unsurprisingly the design ended up with something different. However the reasons for this were more implementation and not design based, as you might expect.
-  - Riak conflicted somewhat with the 'easy to install' requirement, and the general maintenance-free goal. Namely, nodes in a Riak cluster have explicit join and leave operations (learned the hard way), whereas I was looking for a self healing cluster. (This is also hinted at in the DynamoDB paper.)
-  - Ideally Riak would have worked because it supplies both strongly consistent buckets and eventually consistent buckets. I also overlooked that strongly consistent bucket support was listed as experimental.
+- Abstracting backend components is messy: Originally plan was to use only Riak for chunks and metadata. This would have built a nicely 'symettric' filesystem without explicit need for coordinators, managers that are found in many distributed filesystems, etc, but unsurprisingly the design ended up with something different. The reasons for this were not design based, as you might expect.
+  - Riak conflicted somewhat with the 'easy to install' requirement, and the general maintenance-free goal. Namely, nodes in a Riak cluster have explicit join and leave operations (learned the hard way), whereas I was looking for a self healing cluster. (This is also mentioned in the DynamoDB paper in their discussion of the gossip protocol.)
+  - The design requires a strongly consistent store for metadata. While Riak does provide this, I also overlooked that strongly consistent bucket support was listed as experimental.
 - You need to have distributed Inode number generation in this design - its soleveable fairly easily with a robust unique id generator.
 - Write-back caching design is not trivial, neither building your own nor leveraging the kernel to do it for you.
 
@@ -55,7 +57,7 @@ make
 ### Notes on the design
 Data in the key value store is of two kinds:
 
-**Metadata** — inode-like data, stored with **strong consistency** in Postgres. Reads to metadata must always see previous writes. Metadata is keyed by 64-bit inode number and stored as protobuf. File inodes contain an ordered list of chunk keys. Concurrent access is controlled via a version counter: updates use optimistic concurrency control (read, modify, write only if version matches).
+**Metadata** — inode-like data, stored with **strong consistency** in Postgres (up to replication delay!). Reads to metadata must always see previous writes. Metadata is keyed by 64-bit inode number and stored as protobuf. File inodes contain an ordered list of chunk keys. Concurrent access is controlled via a version counter: updates use optimistic concurrency control (read, modify, write only if version matches).
 
 **File chunks** — files are broken into fixed-size chunks (except the last, which may be shorter). Chunks are stored in Cassandra at `CL=ONE`.
 
@@ -150,80 +152,16 @@ make integration-test
 
 ## Kubernetes deployment
 
-Both backends have Helm charts that work on generic nodes with no special labels, taints, or node configuration.
-
-### Postgres — CloudNativePG (CNPG)
-
-```bash
-helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm repo update
-
-# Install the operator (once per cluster)
-helm install cnpg cnpg/cloudnative-pg \
-  --namespace cnpg-system --create-namespace
-
-# Create a Postgres cluster for bangfs
-kubectl apply -f - <<EOF
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata:
-  name: bangfs-pg
-spec:
-  instances: 3
-  storage:
-    size: 10Gi
-  bootstrap:
-    initdb:
-      database: bangfs
-      owner: bangfs
-      secret:
-        name: bangfs-pg-credentials
-EOF
-
-# Create the credentials secret first
-kubectl create secret generic bangfs-pg-credentials \
-  --from-literal=username=bangfs \
-  --from-literal=password=<your-password>
-```
-
-CNPG handles automatic failover (Raft-based primary election), rolling upgrades, and WAL streaming replication. No manual `pg_ctl` or join/leave commands. The cluster service is at `bangfs-pg-rw.default.svc` (read-write) and `bangfs-pg-r.default.svc` (read replicas).
-
-```bash
-export POSTGRES_HOST=bangfs-pg-rw.default.svc
-export POSTGRES_USER=bangfs
-export POSTGRES_PASSWORD=<your-password>
-export POSTGRES_DB=bangfs
-```
-
-### Cassandra — Bitnami Helm chart
-
-```bash
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
-
-helm install bangfs-cass bitnami/cassandra \
-  --set replicaCount=3 \
-  --set dbUser.user=bangfs \
-  --set dbUser.password=<your-password>
-```
-
-Cassandra auto-rebalances when pods are added or removed. Scale up by changing `replicaCount`; the ring redistributes token ranges automatically.
-
-```bash
-export CASSANDRA_HOSTS=bangfs-cass.default.svc
-export CASSANDRA_USER=bangfs
-export CASSANDRA_PASSWORD=<your-password>
-export CASSANDRA_RF=3
-```
+Uses a combination of pre-existing helm chart (postgres) and custom StatefulSet yaml (Cassandra, as the helm chart was not available).
 
 ### Initializing the filesystem
 
 Once both backends are running, initialize the namespace and mount:
 
 ```bash
-mkfs-bangfs -namespace mynamespace
+$ mkfs-bangfs -namespace mynamespace
 
-mount-fuse-bangfs -namespace mynamespace -mount /mnt/bangfs
+$ mount-fuse-bangfs -namespace mynamespace -mount /mnt/bangfs
 ```
 
 ## Future ideas
