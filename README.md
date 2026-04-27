@@ -1,40 +1,38 @@
- BangFS
+# BangFS - Learning project to design and build a distributed filesystem
 
-FUSE distributed filesystem with minimal components:
+## Objectives
+- use **off the shelf components** (ie, databases, key-value stores, etc) for 'backends' and build a client library on top 
+- use **as few components as possible**
+  - initially this involved only one technology - Riak - for backend, but see learnings below.
+- be easy to install on a cluster like microk8s [TODO:reference]
+- handle concurrent writes in a reasonable way but be more favorable to single writer/multi reader scenaros, eg:
+  - media storage
+  - filesystem for inference servers
+- the backend systems should not require too much maintenance
+- *not* have super high durability guarantees, and favor caching for speed, for example - occasianally, data that is referenced in filesystem metadata might not have been written, or be readily available right away, etc.
 
-- A key value store for metadata.
-- A key value store for file data chunks
-- A client program
-- (Planned) - file system checker and garbage collector
+## Startup
 
-_This is an experimental project and a work in progress_: see [Shortcomings](#shortcomings) for what's missing, and run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of what works.
+run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of what works.
 
-The idea came from wanting to implement distributed systems concepts hands-on: consistency models, CAS concurrency, chunked storage, and the tradeoffs between metadata correctness and data throughput. Design decisions are discovered as much as planned.
+if you have Kubernets environment available
+
+```sh
+make
+. k8s_backends.sh  # If you have a Kubernetes environment available (recommended)
+./mkfs-bangfs
+./mount-fuse
+
 
 ## Learnings
 
-- unique id generation is not obvious until you hit collisions
-- "eventually consistent" and "fast" are not the same thing, eventual consistency is about convergence not latency
-- NATS jepsen 2025: strong consistency claims dont mean much without an actual jepsen test
-- Cassandra QUORUM is not linearizable, two coordinators can both get quorum acks for conflicting writes and LWW picks a winner silently
-- for immutable content-addressed chunks, consistency model basically doesnt matter. write once = no conflicts possible
-- splitting metadata and chunk stores lets you pick the right tradeoff per access pattern instead of compromising both
-- riak strongly consistent buckets were marked experimental in 2.2.3 docs. should have been a red flag
-- fuse makes kernel <-> userspace boundary very visible. every syscall you take for granted becomes a method you have to implement
-- vclock comparison is deceptively simple until you have siblings and need merge logic
-- postgres optimistic locking with version column is simpler than it looks and good enough for filesystem metadata concurrency
-- k8s operators that need node labels/hugepages/cpu-pinning are a sign the software wasnt designed for cloud-native from the start
+- Originally plan was to use only Riak This would have built a nicely 'symettric' filesystem without explicit need for coordinators, managers that are found in many distributed filesystems, etc, but unsurprisingly the design ended up with something different. However the reasons for this were more implementation and not design based, as you might expect.
+  - Riak conflicted somewhat with the 'easy to install' requirement, and the general maintenance-free goal. Namely, nodes in a Riak cluster have explicit join and leave operations (learned the hard way), whereas I was looking for a self healing cluster. (This is also hinted at in the DynamoDB paper.)
+  - Ideally Riak would have worked because it supplies both strongly consistent buckets and eventually consistent buckets. I also overlooked that strongly consistent bucket support was listed as experimental.
+- You need to have distributed Inode number generation in this design - its soleveable fairly easily with a robust unique id generator.
+- Write-back caching design is not trivial, neither building your own nor leveraging the kernel to do it for you.
 
-## Use case / tradeoffs
-
-This concept should work for a single writer at a time per file, tolerating some undefined behavior for multiple clients writing — unlike distributed filesystems such as GFS.
-But this makes it convenient to use simple CAS (read, modify, write if not updated in the meantime) for metadata write consistency. This eliminates the need for any coordination services at the cost of failing some writes, and possibly orphaning some file chunks.
-
-File data writes are expected to be on the hot path — tradeoff of consistency for speed writing (eg, storing many chunks faster without the consensus overhead of strong consistency).
-
-Overall this filesystem (conceptually at least) is a good fit for something like a CDN where multiple clients can read but only one client writes a given file.
-
-## Architecture
+## Design
 
 ```
   ┌────────────────────────────┐
@@ -54,15 +52,16 @@ Overall this filesystem (conceptually at least) is a good fit for something like
   └───────────────┘         └────────────────┘
 ```
 
+### Notes on the design
 Data in the key value store is of two kinds:
 
 **Metadata** — inode-like data, stored with **strong consistency** in Postgres. Reads to metadata must always see previous writes. Metadata is keyed by 64-bit inode number and stored as protobuf. File inodes contain an ordered list of chunk keys. Concurrent access is controlled via a version counter: updates use optimistic concurrency control (read, modify, write only if version matches).
 
-**File chunks** — files are broken into fixed-size chunks (except the last, which may be shorter). Chunks are stored in Cassandra at `CL=ONE`: a read immediately after a write may not reflect the latest data. There is no ordering guarantee for writes to the same chunk key across replicas.
+**File chunks** — files are broken into fixed-size chunks (except the last, which may be shorter). Chunks are stored in Cassandra at `CL=ONE`.
 
-The backend is abstracted behind a Go interface (`KVStore`) with separate operations for metadata and chunks. The current implementation uses **Postgres** (via `pgx/v5`) for metadata and **Cassandra** (via `gocql`) for chunks. The interface could be implemented for any key-value store.
+The backend is abstracted behind a Go interface (`KVStore`) with separate operations for metadata and chunks. The current implementation uses **Postgres** (via `pgx/v5`) for metadata and **Cassandra** (via `gocql`) for chunks.
 
-Concurrency is handled by using **write-once chunk keys**: each client's `IdGenerator` embeds its own identity, so two clients never produce the same key. Every chunk write (whether appending or replacing) generates a fresh, globally unique key. Metadata is then updated to point to the new key. This gives an invariant: for any version of the metadata, every referenced chunk is immutable and will eventually be readable.
+Concurrency is handled by using **write-once chunk keys**: each client's `IdGenerator` embeds its own identity.
 
 Inode numbers and chunk keys are generated by a simple **Unique Sequence number** that embeds the client's ID.
 
@@ -227,19 +226,9 @@ mkfs-bangfs -namespace mynamespace
 mount-fuse-bangfs -namespace mynamespace -mount /mnt/bangfs
 ```
 
-## Shortcomings
-
-This design is viable in the happy path (see [tests](#testing)) for single-writer, read-heavy workloads but is not yet viable for general-purpose multi-client filesystem use. Some shortcomings as of this README:
-
-- **No crash recovery:** chunks are written before metadata. If the metadata update fails (vclock conflict, crash, network error), orphaned chunks are never cleaned up. There is no write-ahead log.
-- **No conflict resolution:** CAS on metadata detects concurrent writes but does not retry or merge — the write is dropped and the client gets EIO.
-- **Multi-step operations are not atomic:** rename updates 3 metadata keys sequentially. A failure mid-way can leave the filesystem in an inconsistent state (eg, file removed from source directory but not added to target).
-- **Read-after-write visibility:** a read immediately after a write may fail to find a chunk that metadata already references, due to Cassandra's eventual consistency propagation delay.
-
-Various functions of a filesystem are not currently/yet implemented (see [tests](#testing) for the SOT on this).
-
 ## Future ideas
 
+- Various functions of a filesystem are not currently/yet implemented (see [tests](#testing) for the SOT on this).
 - Benchmark read/write throughput and characterize performance bottlenecks.
 - Retry logic for vclock conflicts in directory operations.
 - Directory indexing for O(1) child lookup.
